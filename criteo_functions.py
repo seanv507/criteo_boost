@@ -12,7 +12,11 @@ from polars import selectors as cs
 from wandb.integration.xgboost import WandbCallback
 
 CAT_COLS = [f"C{i}" for i in range(1, 27)]
-
+data_dir = Path("../data/Criteo")
+N_INTS = 13
+INTS = [f"I{i}" for i in range(1, N_INTS + 1)]
+N_CATS = 26
+CAT_COLS = [f"C{i}" for i in range(1, N_CATS + 1)]
 
 def create_ctr(df, cols):
     """Compute per-group click-through rate (CTR) with its deviation from the global CTR.
@@ -57,17 +61,14 @@ def get_data(config):
         split into X and y
     """
     train, valid, test = load_data(config['sample_every'])
-    n_ints = 13
-    ints = [f"I{i}" for i in range(1, n_ints + 1)]
-    n_cats = 26
-    cats = [f"C{i}" for i in range(1, n_cats + 1)]
-    train = fill_missing(train, cats, "missing")
-    valid = fill_missing(valid, cats, "missing")
-    test = fill_missing(test, cats, "missing")
-    cat_encode, gm = calc_cat_encode(train, config, cats)
-    train = encode_cats(train, cat_encode, cats)
-    valid = encode_cats(valid, cat_encode, cats)
-    test = encode_cats(test, cat_encode, cats)
+    
+    train = fill_missing(train, CAT_COLS, "missing")
+    valid = fill_missing(valid, CAT_COLS, "missing")
+    test = fill_missing(test, CAT_COLS, "missing")
+    cat_encode, gm = calc_cat_encode(train, config, CAT_COLS)
+    train = encode_cats(train, cat_encode, CAT_COLS)
+    valid = encode_cats(valid, cat_encode, CAT_COLS)
+    test = encode_cats(test, cat_encode, CAT_COLS)
 
     train_X, train_y = get_data_XY(train)
     valid_X, valid_y = get_data_XY(valid)
@@ -87,7 +88,7 @@ def load_data(sample_every):
     Returns:
         (train, valid, test) LazyFrames.
     """
-    data_dir = Path("../data/Criteo")
+    
     train = pl.scan_parquet(data_dir / "train.parquet", row_index_name='Row').filter(pl.col('Row').mod(sample_every) == 0)
     valid = pl.scan_parquet(data_dir / "valid.parquet")
     test = pl.scan_parquet(data_dir / "test.parquet")
@@ -109,24 +110,24 @@ def fill_missing(df, cols, missing_val="missing"):
     return df
 
 
-def calc_cat_encode(df, config, cats):
-    """Fit a smoothed target-CTR encoding for each categorical column in `cats`.
+def calc_cat_encode(df, config, cat_cols):
+    """Fit a smoothed target-CTR encoding for each categorical column in `cat_cols`.
 
     Calls `transform_cat` per column with `config['cat_cutoff']` and
     `config['cat_pseudo_count']`, and stacks the per-category rows with the pooled
     "rest" row into one table per column.
 
     Args:
-        df: LazyFrame containing `cats` and a `Label` column.
+        df: LazyFrame containing categorical columns and a `Label` column.
         config: dict with `cat_cutoff` and `cat_pseudo_count`.
-        cats: list of categorical column names to encode.
+        cat_cols: list of categorical column names to encode.
 
     Returns:
         (cat_encode, global_mean): cat_encode maps column name to its encoding
         DataFrame; global_mean is the overall Label mean (from the last column fit).
     """
     cat_encode = {}
-    for col in cats:
+    for col in cat_cols:
         cat_ctrs, rest_ctr, gm = transform_cat(df, col, 'Label', cutoff=config['cat_cutoff'], pseudo_count=config['cat_pseudo_count'])
         cat_encode[col] = pl.concat((cat_ctrs.collect(), rest_ctr.collect()), how='diagonal')
     return cat_encode, gm
@@ -181,23 +182,23 @@ def transform_cat(df, cols, label_col, cutoff, pseudo_count):
     return df_ctr, rest, global_mean
 
 
-def encode_cats(df, cat_encode, cats):
-    """Replace each categorical column in `cats` with its target-encoded value.
+def encode_cats(df, cat_encode, cat_cols):
+    """Replace each categorical column in `cat_cols` with its target-encoded value.
 
-    Left-joins each column in `cats` against its encoding table from `cat_encode`
+    Left-joins each column in `cat_cols` against its encoding table from `cat_encode`
     (as produced by `calc_cat_encode`), drops the original column, and fills any
     unmatched (missing) encodings with 0.
 
     Args:
-        df: LazyFrame containing `cats`.
+        df: LazyFrame containing `cat_cols` columns.
         cat_encode: dict mapping column name to its encoding DataFrame, keyed by
             `col` with a `{col}_encode` value column.
-        cats: list of categorical column names to encode.
+        cat_cols: list of categorical column names to encode.
 
     Returns:
         LazyFrame with each `cat` column replaced by a `{cat}_encode` column.
     """
-    for cat in cats:
+    for cat in cat_cols:
         df = df.join(cat_encode[cat].lazy().rename({'ctr_smooth_diff': f'{cat}_encode'}).select([cat, f'{cat}_encode']), how='left', on=cat).drop(cat)
     df = df.with_columns(cs.ends_with("_encode").fill_null(0))
     return df
