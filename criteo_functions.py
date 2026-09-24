@@ -6,10 +6,7 @@ import operator
 from pathlib import Path
 
 import polars as pl
-import wandb
-import xgboost as xgb
 from polars import selectors as cs
-from wandb.integration.xgboost import WandbCallback
 
 CAT_COLS = [f"C{i}" for i in range(1, 27)]
 data_dir = Path("../data/Criteo")
@@ -59,9 +56,12 @@ def get_data(config):
         add missing category
         encode categoricals using target encoding
         split into X and y
+
+        config['data_dir'] optionally overrides the default Criteo parquet directory.
     """
-    train, valid, test = load_data(config['sample_every'])
-    
+    data_dir = config.get('data_dir', Path("../data/Criteo"))
+    train, valid, test = load_data(config['sample_every'], data_dir)
+
     train = fill_missing(train, CAT_COLS, "missing")
     valid = fill_missing(valid, CAT_COLS, "missing")
     test = fill_missing(test, CAT_COLS, "missing")
@@ -76,7 +76,7 @@ def get_data(config):
     return train_X, train_y, valid_X, valid_y, test_X, test_y
 
 
-def load_data(sample_every):
+def load_data(sample_every, data_dir=Path("../data/Criteo")):
     """Lazily load the Criteo train/valid/test parquet files.
 
     The train set is subsampled to every `sample_every`-th row (by row index);
@@ -84,11 +84,11 @@ def load_data(sample_every):
 
     Args:
         sample_every: keep one row out of every `sample_every` rows of train.
+        data_dir: directory containing train.parquet/valid.parquet/test.parquet.
 
     Returns:
         (train, valid, test) LazyFrames.
     """
-    
     train = pl.scan_parquet(data_dir / "train.parquet", row_index_name='Row').filter(pl.col('Row').mod(sample_every) == 0)
     valid = pl.scan_parquet(data_dir / "valid.parquet")
     test = pl.scan_parquet(data_dir / "test.parquet")
@@ -368,53 +368,3 @@ def build_categorical_enums(
         )
         enums[col] = pl.Enum(values)
     return enums
-
-
-def get_project_sweep_ids(
-    entity: str = "seanv507",
-) -> dict[str, list[dict]]:
-    """
-    Return every accessible project under `entity` and its sweep IDs.
-
-    Projects without sweeps are included with an empty list.
-    """
-    api = wandb.Api(timeout=60)
-
-    return {
-        project.name: [
-            {
-                "sweep_id": sweep.id,
-                "sweep_config": sweep.config,
-                "sweep_runs": [{
-                    "run_id": run.id,
-                    "run_summary_metrics": run.summary_metrics
-                } for run in sweep.runs]
-            }
-            for sweep in project.sweeps(per_page=100)
-        ]
-        for project in api.projects(entity=entity, per_page=200)
-    }
-
-
-def train():
-    """wandb sweep agent entry point: trains an XGBClassifier for one sweep run."""
-    config = {
-        'sample_every': 1,
-        'cat_cutoff': 25,
-        'cat_pseudo_count': 16,
-        'tree_method': "hist",
-        'early_stopping_rounds': 10,
-        'reg_lambda': 0,
-        'gamma': 10,
-        'n_estimators': 150,
-        'learning_rate': .1,
-        'max_depth': 60,
-    }
-
-    with wandb.init(config=config) as run:
-        config_data = {key: value for key, value in wandb.config.items() if key in ('sample_every', 'cat_cutoff', 'cat_pseudo_count')}
-        config_xgb = {key: value for key, value in wandb.config.items() if key not in ('sample_every', 'cat_cutoff', 'cat_pseudo_count')}
-        train_X, train_y, valid_X, valid_y = get_data(config_data)
-        clf = xgb.XGBClassifier(**config_xgb, callbacks=[WandbCallback(log_feature_importance=True)])
-        clf.fit(train_X, train_y, eval_set=[(train_X, train_y), (valid_X, valid_y)], verbose=2,)
-        tree_df = clf.get_booster().trees_to_dataframe()
