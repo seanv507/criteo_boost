@@ -15,6 +15,7 @@ INTS = [f"I{i}" for i in range(1, N_INTS + 1)]
 N_CATS = 26
 CAT_COLS = [f"C{i}" for i in range(1, N_CATS + 1)]
 
+
 def create_ctr(df, cols):
     """Compute per-group click-through rate (CTR) with its deviation from the global CTR.
 
@@ -29,43 +30,41 @@ def create_ctr(df, cols):
     Returns:
         LazyFrame with one row per group, sorted by `count` descending.
     """
-    ctr = df.select(pl.col('Label').mean()).collect().item(0, 0)
+    ctr = df.select(pl.col("Label").mean()).collect().item(0, 0)
     df_ctr = (
-        df
-        .group_by(cols)
+        df.group_by(cols)
         .agg(
-            pl.col('Label').len().alias('count'),
-            pl.col('Label').sum().alias('clicks'),
-            pl.col('Label').mean().alias('ctr'),
+            pl.col("Label").len().alias("count"),
+            pl.col("Label").sum().alias("clicks"),
+            pl.col("Label").mean().alias("ctr"),
         )
         .with_columns(
-            diff=pl.col('ctr') - pl.lit(ctr),
-            margin=1.96 * (pl.lit(ctr) * (1 - pl.lit(ctr)) / pl.col('count')).sqrt()
+            diff=pl.col("ctr") - pl.lit(ctr),
+            margin=1.96 * (pl.lit(ctr) * (1 - pl.lit(ctr)) / pl.col("count")).sqrt(),
         )
         .with_columns(
-            margin_n=-pl.col('margin'),
-            delta=pl.col('diff').abs() / pl.col('margin')
+            margin_n=-pl.col("margin"), delta=pl.col("diff").abs() / pl.col("margin")
         )
-        .sort('count', descending=True)
+        .sort("count", descending=True)
     )
     return df_ctr
 
 
 def get_data(config):
-    """ load data, sampling every config['sample_every']
-        add missing category
-        encode categoricals using target encoding
-        split into X and y
+    """load data, sampling every config['sample_every']
+    add missing category
+    encode categoricals using target encoding
+    split into X and y
 
-        config['data_dir'] optionally overrides the default Criteo parquet directory.
+    config['data_dir'] optionally overrides the default Criteo parquet directory.
     """
-    data_dir = config.get('data_dir', Path("../data/Criteo"))
-    train, valid, test = load_data(config['sample_every'], data_dir)
+    data_dir = config.get("data_dir", Path("../data/Criteo"))
+    train, valid, test = load_data(config["sample_every"], data_dir)
 
     train = fill_missing(train, CAT_COLS, "missing")
     valid = fill_missing(valid, CAT_COLS, "missing")
     test = fill_missing(test, CAT_COLS, "missing")
-    cat_encode, gm = calc_cat_encode(train, config, CAT_COLS)
+    cat_encode, _gm = calc_cat_encode(train, config, CAT_COLS)
     train = encode_cats(train, cat_encode, CAT_COLS)
     valid = encode_cats(valid, cat_encode, CAT_COLS)
     test = encode_cats(test, cat_encode, CAT_COLS)
@@ -89,7 +88,9 @@ def load_data(sample_every, data_dir=Path("../data/Criteo")):
     Returns:
         (train, valid, test) LazyFrames.
     """
-    train = pl.scan_parquet(data_dir / "train.parquet", row_index_name='Row').filter(pl.col('Row').mod(sample_every) == 0)
+    train = pl.scan_parquet(data_dir / "train.parquet", row_index_name="Row").filter(
+        pl.col("Row").mod(sample_every) == 0
+    )
     valid = pl.scan_parquet(data_dir / "valid.parquet")
     test = pl.scan_parquet(data_dir / "test.parquet")
     return train, valid, test
@@ -128,8 +129,16 @@ def calc_cat_encode(df, config, cat_cols):
     """
     cat_encode = {}
     for col in cat_cols:
-        cat_ctrs, rest_ctr, gm = transform_cat(df, col, 'Label', cutoff=config['cat_cutoff'], pseudo_count=config['cat_pseudo_count'])
-        cat_encode[col] = pl.concat((cat_ctrs.collect(), rest_ctr.collect()), how='diagonal')
+        cat_ctrs, rest_ctr, gm = transform_cat(
+            df,
+            col,
+            "Label",
+            cutoff=config["cat_cutoff"],
+            pseudo_count=config["cat_pseudo_count"],
+        )
+        cat_encode[col] = pl.concat(
+            (cat_ctrs.collect(), rest_ctr.collect()), how="diagonal"
+        )
     return cat_encode, gm
 
 
@@ -158,26 +167,24 @@ def transform_cat(df, cols, label_col, cutoff, pseudo_count):
         global_mean: overall mean of `label_col` (float).
     """
 
-    df_ctr = (
-        df
-        .group_by(cols)
-        .agg(
-            pl.col(label_col).len().alias('count'),
-            pl.col(label_col).sum().alias('clicks'),
-            pl.col(label_col).mean().alias('ctr'),
-        )
+    df_ctr = df.group_by(cols).agg(
+        pl.col(label_col).len().alias("count"),
+        pl.col(label_col).sum().alias("clicks"),
+        pl.col(label_col).mean().alias("ctr"),
     )
-    rest = df_ctr.filter(pl.col('count') < cutoff).select(['count', 'clicks']).sum()
+    rest = df_ctr.filter(pl.col("count") < cutoff).select(["count", "clicks"]).sum()
     # rest is now row vector
-    rest = rest.with_columns(ctr=pl.col('clicks') / pl.col('count'))
+    rest = rest.with_columns(ctr=pl.col("clicks") / pl.col("count"))
 
-    df_ctr = df_ctr.filter(pl.col('count') >= cutoff)
+    df_ctr = df_ctr.filter(pl.col("count") >= cutoff)
 
     global_mean = df.select(label_col).mean().collect().item(0, 0)
-    ctr_smooth = (pl.col('clicks') + global_mean * pseudo_count) / (pl.col('count') + pseudo_count)
-    df_ctr = df_ctr.with_columns(
-        ctr_smooth_diff=ctr_smooth - pl.lit(global_mean)
-    ).sort('ctr_smooth_diff', descending=True)
+    ctr_smooth = (pl.col("clicks") + global_mean * pseudo_count) / (
+        pl.col("count") + pseudo_count
+    )
+    df_ctr = df_ctr.with_columns(ctr_smooth_diff=ctr_smooth - pl.lit(global_mean)).sort(
+        "ctr_smooth_diff", descending=True
+    )
     rest = rest.with_columns(ctr_smooth=ctr_smooth)
     return df_ctr, rest, global_mean
 
@@ -199,15 +206,26 @@ def encode_cats(df, cat_encode, cat_cols):
         LazyFrame with each `cat` column replaced by a `{cat}_encode` column.
     """
     for cat in cat_cols:
-        df = df.join(cat_encode[cat].lazy().rename({'ctr_smooth_diff': f'{cat}_encode'}).select([cat, f'{cat}_encode']), how='left', on=cat).drop(cat)
+        df = df.join(
+            cat_encode[cat]
+            .lazy()
+            .rename({"ctr_smooth_diff": f"{cat}_encode"})
+            .select([cat, f"{cat}_encode"]),
+            how="left",
+            on=cat,
+        ).drop(cat)
     df = df.with_columns(cs.ends_with("_encode").fill_null(0))
     return df
 
 
 def get_data_XY(data):
-    """ prepare training data, select columns starting with I, ending with_encode or starting with ar_"""
-    data_X = data.drop(['Row', 'Label'], strict=False).select(cs.starts_with("I") | cs.ends_with("_encode") | cs.starts_with("ar_")).collect()
-    data_y = data.select('Label').collect().to_series()
+    """prepare training data, select columns starting with I, ending with_encode or starting with ar_"""
+    data_X = (
+        data.drop(["Row", "Label"], strict=False)
+        .select(cs.starts_with("I") | cs.ends_with("_encode") | cs.starts_with("ar_"))
+        .collect()
+    )
+    data_y = data.select("Label").collect().to_series()
     return data_X, data_y
 
 
@@ -229,31 +247,39 @@ def get_tree_statistics(model):
     booster = model.get_booster()
     df = pl.from_pandas(booster.trees_to_dataframe())
 
-    lam = float(json.loads(booster.save_config())["learner"]["gradient_booster"]["tree_train_param"]["lambda"])
-    eta = float(json.loads(booster.save_config())["learner"]["gradient_booster"]["tree_train_param"]["eta"])
+    lam = float(
+        json.loads(booster.save_config())["learner"]["gradient_booster"][
+            "tree_train_param"
+        ]["lambda"]
+    )
+    eta = float(
+        json.loads(booster.save_config())["learner"]["gradient_booster"][
+            "tree_train_param"
+        ]["eta"]
+    )
     df = df.with_columns(H=pl.col("Cover"))  # hessian sum, valid for every row
     is_leaf = pl.col("Feature") == "Leaf"
-    df = df.with_columns(G=pl.when(is_leaf).then(-pl.col("Gain") * pl.col("H") + lam) / eta)
+    df = df.with_columns(
+        G=pl.when(is_leaf).then(-pl.col("Gain") * pl.col("H") + lam) / eta
+    )
     tdfs = {}
     for tree_id, tdf in df.sort("Node", descending=True).group_by("Tree"):
-
         print(tree_id)
         g = dict(zip(tdf["ID"], tdf["G"]))
 
         intermediate_node = tdf.filter(~is_leaf)
         for row in intermediate_node.iter_rows(named=True):
-            g[row["ID"]] = g[row["Yes"]] + g[row["No"]]  # missing already folds into Yes/No
-        tdf = (
-            tdf
-            .with_columns(G=pl.col("ID").replace_strict(g))
-            .with_columns(Metric=pl.col("G") ** 2 / (pl.col("H") + lam))
-
+            g[row["ID"]] = (
+                g[row["Yes"]] + g[row["No"]]
+            )  # missing already folds into Yes/No
+        tdf = tdf.with_columns(G=pl.col("ID").replace_strict(g)).with_columns(
+            Metric=pl.col("G") ** 2 / (pl.col("H") + lam)
         )
         metric = dict(zip(tdf["ID"], tdf["Metric"]))
-        tdf = (
-            tdf
-            .with_columns(pl.col(["Yes", "No"]).replace_strict(metric).name.prefix("Metric_"))
-            .with_columns(Gain_Expected=pl.col("Metric_Yes") + pl.col("Metric_No") - pl.col("Metric"))
+        tdf = tdf.with_columns(
+            pl.col(["Yes", "No"]).replace_strict(metric).name.prefix("Metric_")
+        ).with_columns(
+            Gain_Expected=pl.col("Metric_Yes") + pl.col("Metric_No") - pl.col("Metric")
         )
 
         tdfs[tree_id] = tdf
@@ -290,20 +316,19 @@ def parse_frequent(filename):
         LazyFrame with `text` (list of [col, value] pairs), `support` and `rules`.
     """
     df = (
-        pl.scan_csv(filename, has_header=False, schema={"text": pl.String}).select(
-            pl.col('text')
-            .str.split(" ")
-        ).with_columns(
-            support=pl.col("text").list[-1].str.strip_chars("()").cast(pl.Float64) / 100,
+        pl.scan_csv(filename, has_header=False, schema={"text": pl.String})
+        .select(pl.col("text").str.split(" "))
+        .with_columns(
+            support=pl.col("text").list[-1].str.strip_chars("()").cast(pl.Float64)
+            / 100,
             text=(
                 pl.col("text")
                 .list.head(pl.col("text").list.len() - 1)
                 .list.eval(pl.element().str.split(":"))
                 # .list.to_struct(upper_bound=5)
-            )
-        ).with_columns(
-            rules=pl.col('text').map_elements(create_expression, pl.Object)
+            ),
         )
+        .with_columns(rules=pl.col("text").map_elements(create_expression, pl.Object))
     )
     return df
 
@@ -323,21 +348,21 @@ def parse_association(filename):
         and `rules`.
     """
     # Label1: <- X X X (Y, Y)
-    regex = r"Label:1 <- (?P<items>[^(]+) \((?P<support>[0-9.]+), (?P<confidence>[0-9.]+)\)"
+    regex = (
+        r"Label:1 <- (?P<items>[^(]+) \((?P<support>[0-9.]+), (?P<confidence>[0-9.]+)\)"
+    )
     df = (
-        pl.scan_csv(filename, has_header=False, schema={"text": pl.String}, separator="|").select(
-            pl.col('text')
-            .str.extract_groups(regex)
-        ).unnest('text')
+        pl.scan_csv(
+            filename, has_header=False, schema={"text": pl.String}, separator="|"
+        )
+        .select(pl.col("text").str.extract_groups(regex))
+        .unnest("text")
         .with_columns(pl.col("items").str.split(" "))
         .with_columns(
             pl.col(["support", "confidence"]).cast(pl.Float64) / 100,
-            pl.col('items')
-            .list.eval(pl.element().str.split(":"))
+            pl.col("items").list.eval(pl.element().str.split(":")),
         )
-        .with_columns(
-            rules=pl.col('items').map_elements(create_expression, pl.Object)
-        )
+        .with_columns(rules=pl.col("items").map_elements(create_expression, pl.Object))
     )
     return df
 

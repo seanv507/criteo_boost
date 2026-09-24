@@ -22,5 +22,17 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "nbstripout>=0.9.1",
+    "pre-commit>=4.6.2",
     "pytest>=9.1.1",
+    "ruff>=0.16.8",
 ]
+
+[tool.ruff]
+target-version = "py314"
+# criteo_analysis.ipynb / wandb_report.ipynb are preserved scratchpads with
+# intentionally-broken cells (see the in-notebook warning notes) -- linting/
+# formatting them would fight that, so they're excluded here. wandb.md is a
+# saved reference doc (not maintained source) whose embedded ```python block
+# ruff would otherwise reformat.
+extend-exclude = ["criteo_analysis.ipynb", "wandb_report.ipynb", "wandb.md"]

@@ -7,16 +7,18 @@ import xgboost as xgb
 
 import criteo_functions as cf
 
-
 # ---------------------------------------------------------------------------
 # create_ctr
 # ---------------------------------------------------------------------------
 
+
 def test_create_ctr_matches_formula():
-    df = pl.LazyFrame({
-        "g": ["X"] * 4 + ["Y"] * 4,
-        "Label": [1, 1, 0, 0, 1, 0, 0, 0],
-    })
+    df = pl.LazyFrame(
+        {
+            "g": ["X"] * 4 + ["Y"] * 4,
+            "Label": [1, 1, 0, 0, 1, 0, 0, 0],
+        }
+    )
     out = cf.create_ctr(df, "g").collect().sort("g")
 
     ctr_global = 3 / 8
@@ -34,10 +36,12 @@ def test_create_ctr_matches_formula():
 
 
 def test_create_ctr_sorted_by_count_descending():
-    df = pl.LazyFrame({
-        "g": ["small"] * 2 + ["big"] * 5,
-        "Label": [1, 0, 1, 1, 0, 0, 1],
-    })
+    df = pl.LazyFrame(
+        {
+            "g": ["small"] * 2 + ["big"] * 5,
+            "Label": [1, 0, 1, 1, 0, 0, 1],
+        }
+    )
     out = cf.create_ctr(df, "g").collect()
     assert out["g"].to_list() == ["big", "small"]
 
@@ -46,11 +50,14 @@ def test_create_ctr_sorted_by_count_descending():
 # fill_missing
 # ---------------------------------------------------------------------------
 
+
 def test_fill_missing_replaces_nulls_only_in_given_cols():
-    df = pl.LazyFrame({
-        "a": ["x", None, "z"],
-        "b": ["p", None, "r"],
-    })
+    df = pl.LazyFrame(
+        {
+            "a": ["x", None, "z"],
+            "b": ["p", None, "r"],
+        }
+    )
     out = cf.fill_missing(df, ["a"]).collect()
     assert out["a"].to_list() == ["x", "missing", "z"]
     assert out["b"].to_list() == ["p", None, "r"]
@@ -66,12 +73,17 @@ def test_fill_missing_custom_value():
 # transform_cat
 # ---------------------------------------------------------------------------
 
+
 def test_transform_cat_smoothing_and_cutoff():
-    df = pl.LazyFrame({
-        "cat": ["a", "a", "a", "a", "a", "b", "b", "c"],
-        "Label": [1, 1, 0, 0, 0, 1, 0, 1],
-    })
-    df_ctr, rest, global_mean = cf.transform_cat(df, "cat", "Label", cutoff=2, pseudo_count=2)
+    df = pl.LazyFrame(
+        {
+            "cat": ["a", "a", "a", "a", "a", "b", "b", "c"],
+            "Label": [1, 1, 0, 0, 0, 1, 0, 1],
+        }
+    )
+    df_ctr, rest, global_mean = cf.transform_cat(
+        df, "cat", "Label", cutoff=2, pseudo_count=2
+    )
     df_ctr = df_ctr.collect()
     rest = rest.collect()
 
@@ -101,7 +113,9 @@ def test_transform_cat_smoothing_and_cutoff():
 
 def test_transform_cat_all_rare_categories_pooled():
     df = pl.LazyFrame({"cat": ["a", "b", "c"], "Label": [1, 0, 1]})
-    df_ctr, rest, global_mean = cf.transform_cat(df, "cat", "Label", cutoff=10, pseudo_count=1)
+    df_ctr, rest, global_mean = cf.transform_cat(
+        df, "cat", "Label", cutoff=10, pseudo_count=1
+    )
     assert df_ctr.collect().is_empty()
     rest_row = rest.collect().row(0, named=True)
     assert rest_row["count"] == 3
@@ -113,12 +127,15 @@ def test_transform_cat_all_rare_categories_pooled():
 # calc_cat_encode
 # ---------------------------------------------------------------------------
 
+
 def test_calc_cat_encode_returns_one_table_per_column():
-    df = pl.LazyFrame({
-        "C1": ["a", "a", "b", "b", "c"],
-        "C2": ["x", "x", "x", "y", "y"],
-        "Label": [1, 0, 1, 0, 1],
-    })
+    df = pl.LazyFrame(
+        {
+            "C1": ["a", "a", "b", "b", "c"],
+            "C2": ["x", "x", "x", "y", "y"],
+            "Label": [1, 0, 1, 0, 1],
+        }
+    )
     config = {"cat_cutoff": 1, "cat_pseudo_count": 1}
     cat_encode, global_mean = cf.calc_cat_encode(df, config, ["C1", "C2"])
 
@@ -134,6 +151,7 @@ def test_calc_cat_encode_returns_one_table_per_column():
 # ---------------------------------------------------------------------------
 # encode_cats
 # ---------------------------------------------------------------------------
+
 
 def test_encode_cats_joins_and_fills_unmatched_with_zero():
     cat_encode = {
@@ -162,16 +180,19 @@ def test_encode_cats_multiple_columns():
 # get_data_XY
 # ---------------------------------------------------------------------------
 
+
 def test_get_data_xy_selects_expected_columns():
-    df = pl.LazyFrame({
-        "Row": [0, 1],
-        "Label": [1, 0],
-        "I1": [1.0, 2.0],
-        "I2": [3.0, 4.0],
-        "C1_encode": [0.1, 0.2],
-        "ar_flag": [1, 0],
-        "other": ["x", "y"],
-    })
+    df = pl.LazyFrame(
+        {
+            "Row": [0, 1],
+            "Label": [1, 0],
+            "I1": [1.0, 2.0],
+            "I2": [3.0, 4.0],
+            "C1_encode": [0.1, 0.2],
+            "ar_flag": [1, 0],
+            "other": ["x", "y"],
+        }
+    )
     data_X, data_y = cf.get_data_XY(df)
 
     assert set(data_X.columns) == {"I1", "I2", "C1_encode", "ar_flag"}
@@ -189,6 +210,7 @@ def test_get_data_xy_works_without_row_column():
 # ---------------------------------------------------------------------------
 # get_tree_statistics
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(scope="module")
 def fitted_classifier():
@@ -234,6 +256,7 @@ def test_get_tree_statistics_gain_expected_consistent(fitted_classifier):
 # create_expression
 # ---------------------------------------------------------------------------
 
+
 def test_create_expression_filters_matching_rows():
     df = pl.DataFrame({"a": [1, 1, 2], "b": ["x", "y", "x"]})
     expr = cf.create_expression([("a", 1), ("b", "x")])
@@ -252,6 +275,7 @@ def test_create_expression_single_pair():
 # ---------------------------------------------------------------------------
 # parse_frequent
 # ---------------------------------------------------------------------------
+
 
 def test_parse_frequent_parses_items_and_support(tmp_path):
     freq_file = tmp_path / "freq.txt"
@@ -276,6 +300,7 @@ def test_parse_frequent_rules_filter_correctly(tmp_path):
 # ---------------------------------------------------------------------------
 # parse_association
 # ---------------------------------------------------------------------------
+
 
 def test_parse_association_parses_items_support_confidence(tmp_path):
     assoc_file = tmp_path / "assoc.txt"
@@ -303,6 +328,7 @@ def test_parse_association_rules_filter_correctly(tmp_path):
 # build_categorical_enums
 # ---------------------------------------------------------------------------
 
+
 def test_build_categorical_enums_unions_sorted_distinct_values(tmp_path):
     path_a = tmp_path / "a.parquet"
     path_b = tmp_path / "b.parquet"
@@ -329,6 +355,7 @@ def test_build_categorical_enums_multiple_columns(tmp_path):
 # ---------------------------------------------------------------------------
 # load_data
 # ---------------------------------------------------------------------------
+
 
 def test_load_data_subsamples_train_only(tmp_path, monkeypatch):
     data_dir = tmp_path / "data" / "Criteo"
@@ -368,6 +395,7 @@ def test_load_data_accepts_explicit_data_dir(tmp_path):
 # get_data
 # ---------------------------------------------------------------------------
 
+
 def _synthetic_split(n_rows, offset=0):
     n_ints, n_cats = 13, 26
     data = {
@@ -384,13 +412,21 @@ def _synthetic_split(n_rows, offset=0):
 
 
 def test_get_data_produces_expected_shapes(monkeypatch):
-    train, valid, test = _synthetic_split(6), _synthetic_split(3, offset=100), _synthetic_split(2, offset=200)
-    monkeypatch.setattr(cf, "load_data", lambda sample_every, data_dir=None: (train, valid, test))
+    train, valid, test = (
+        _synthetic_split(6),
+        _synthetic_split(3, offset=100),
+        _synthetic_split(2, offset=200),
+    )
+    monkeypatch.setattr(
+        cf, "load_data", lambda sample_every, data_dir=None: (train, valid, test)
+    )
 
     config = {"sample_every": 1, "cat_cutoff": 1, "cat_pseudo_count": 1}
     train_X, train_y, valid_X, valid_y, test_X, test_y = cf.get_data(config)
 
-    expected_cols = {f"I{i}" for i in range(1, 14)} | {f"C{i}_encode" for i in range(1, 27)}
+    expected_cols = {f"I{i}" for i in range(1, 14)} | {
+        f"C{i}_encode" for i in range(1, 27)
+    }
     assert set(train_X.columns) == expected_cols
     assert train_X.height == 6
     assert len(train_y) == 6
