@@ -8,12 +8,17 @@ from pathlib import Path
 import polars as pl
 from polars import selectors as cs
 
-CAT_COLS = [f"C{i}" for i in range(1, 27)]
-data_dir = Path("../data/Criteo")
 N_INTS = 13
 INTS = [f"I{i}" for i in range(1, N_INTS + 1)]
 N_CATS = 26
 CAT_COLS = [f"C{i}" for i in range(1, N_CATS + 1)]
+
+
+def get_data_dir():
+    path = Path("~/projects/data/Criteo").expanduser()
+    if not path.exists():
+        path = Path("/workspace/data/Criteo")
+    return path
 
 
 def create_ctr(df, cols):
@@ -50,32 +55,35 @@ def create_ctr(df, cols):
     return df_ctr
 
 
-def get_data(config):
-    """load data, sampling every config['sample_every']
+def get_data(config, data_dir, to_numeric: bool):
+    """load data from data_dir, sampling every config['sample_every']
     add missing category
     encode categoricals using target encoding
     split into X and y
-
-    config['data_dir'] optionally overrides the default Criteo parquet directory.
     """
-    data_dir = config.get("data_dir", Path("../data/Criteo"))
     train, valid, test = load_data(config["sample_every"], data_dir)
 
     train = fill_missing(train, CAT_COLS, "missing")
     valid = fill_missing(valid, CAT_COLS, "missing")
     test = fill_missing(test, CAT_COLS, "missing")
     cat_encode, _gm = calc_cat_encode(train, config, CAT_COLS)
-    train = encode_cats(train, cat_encode, CAT_COLS)
-    valid = encode_cats(valid, cat_encode, CAT_COLS)
-    test = encode_cats(test, cat_encode, CAT_COLS)
-
+    if to_numeric:
+        train = encode_cats(train, cat_encode, CAT_COLS)
+        valid = encode_cats(valid, cat_encode, CAT_COLS)
+        test = encode_cats(test, cat_encode, CAT_COLS)
+    else:
+        enums = create_enums(cat_encode)
+        train = cast_enums(merge_rare(train, cat_encode), enums)
+        valid = cast_enums(merge_rare(valid, cat_encode), enums)
+        test = cast_enums(merge_rare(train, cat_encode), enums)
+    print(train.columns)
     train_X, train_y = get_data_XY(train)
     valid_X, valid_y = get_data_XY(valid)
     test_X, test_y = get_data_XY(test)
     return train_X, train_y, valid_X, valid_y, test_X, test_y
 
 
-def load_data(sample_every, data_dir=Path("../data/Criteo")):
+def load_data(sample_every, data_dir):
     """Lazily load the Criteo train/valid/test parquet files.
 
     The train set is subsampled to every `sample_every`-th row (by row index);
@@ -128,8 +136,9 @@ def calc_cat_encode(df, config, cat_cols):
         DataFrame; global_mean is the overall Label mean (from the last column fit).
     """
     cat_encode = {}
+    gm = None
     for col in cat_cols:
-        cat_ctrs, rest_ctr, gm = transform_cat(
+        cat_ctrs, rest_ctr, gm = calc_cat_smooth_ctr(
             df,
             col,
             "Label",
@@ -142,7 +151,7 @@ def calc_cat_encode(df, config, cat_cols):
     return cat_encode, gm
 
 
-def transform_cat(df, cols, label_col, cutoff, pseudo_count):
+def calc_cat_smooth_ctr(df, cols, label_col, cutoff, pseudo_count):
     """Target-encode a categorical column by its smoothed click-through rate (CTR).
 
     Groups `df` by `cols` and computes the count, clicks and raw CTR of each category.
@@ -189,6 +198,31 @@ def transform_cat(df, cols, label_col, cutoff, pseudo_count):
     return df_ctr, rest, global_mean
 
 
+def merge_rare(df, cat_encode):
+    for cat, cat_df in cat_encode.items():
+        df = df.with_columns(
+            pl.when(pl.col(cat).is_in(cat_df[cat].to_list()))
+            .then(pl.col(cat))
+            .otherwise(pl.lit("rare"))
+        )
+    return df
+
+
+def create_enums(cat_encode):
+    enums = {}
+    for cat, cat_df in cat_encode.items():
+        cat_df = cat_df.drop_nulls(cat).sort("count", descending=True)
+        enums[cat] = pl.Enum(
+            cat_df.get_column(cat).to_list() + ["rare"]
+        )  # missing already there
+    return enums
+
+
+def cast_enums(df, enums):
+    df = df.with_columns([pl.col(cat).cast(enum) for cat, enum in enums.items()])
+    return df
+
+
 def encode_cats(df, cat_encode, cat_cols):
     """Replace each categorical column in `cat_cols` with its target-encoded value.
 
@@ -214,17 +248,43 @@ def encode_cats(df, cat_encode, cat_cols):
             how="left",
             on=cat,
         ).drop(cat)
-    df = df.with_columns(cs.ends_with("_encode").fill_null(0))
+    df = df.with_columns(cs.ends_with("_encode").fill_null(0)).rename(
+        {f"{cat}_encode": cat for cat in cat_cols}
+    )
     return df
+
+
+def build_categorical_enums(
+    paths: list[Path],
+    cat_cols: list[str] = CAT_COLS,
+) -> dict[str, pl.Enum]:
+    """Build a polars Enum dtype per categorical column from its distinct values.
+
+    Scans each parquet file in `paths` (concatenated) for each column in `cat_cols`
+    and collects its sorted distinct non-null values into a `pl.Enum`.
+
+    Args:
+        paths: parquet files to scan (e.g. train/valid/test).
+        cat_cols: categorical column names to build enums for.
+
+    Returns:
+        Dict mapping column name to its `pl.Enum` dtype.
+    """
+    enums: dict[str, pl.Enum] = {}
+    for col in cat_cols:
+        values = (
+            pl.concat([pl.scan_parquet(p).select(col) for p in paths])
+            .select(pl.col(col).drop_nulls().unique().sort())
+            .collect(engine="streaming")
+            .get_column(col)
+        )
+        enums[col] = pl.Enum(values)
+    return enums
 
 
 def get_data_XY(data):
     """prepare training data, select columns starting with I, ending with_encode or starting with ar_"""
-    data_X = (
-        data.drop(["Row", "Label"], strict=False)
-        .select(cs.starts_with("I") | cs.ends_with("_encode") | cs.starts_with("ar_"))
-        .collect()
-    )
+    data_X = data.drop(["Row", "Label"], strict=False).collect()
     data_y = data.select("Label").collect().to_series()
     return data_X, data_y
 
@@ -365,31 +425,3 @@ def parse_association(filename):
         .with_columns(rules=pl.col("items").map_elements(create_expression, pl.Object))
     )
     return df
-
-
-def build_categorical_enums(
-    paths: list[Path],
-    cat_cols: list[str] = CAT_COLS,
-) -> dict[str, pl.Enum]:
-    """Build a polars Enum dtype per categorical column from its distinct values.
-
-    Scans each parquet file in `paths` (concatenated) for each column in `cat_cols`
-    and collects its sorted distinct non-null values into a `pl.Enum`.
-
-    Args:
-        paths: parquet files to scan (e.g. train/valid/test).
-        cat_cols: categorical column names to build enums for.
-
-    Returns:
-        Dict mapping column name to its `pl.Enum` dtype.
-    """
-    enums: dict[str, pl.Enum] = {}
-    for col in cat_cols:
-        values = (
-            pl.concat([pl.scan_parquet(p).select(col) for p in paths])
-            .select(pl.col(col).drop_nulls().unique().sort())
-            .collect(engine="streaming")
-            .get_column(col)
-        )
-        enums[col] = pl.Enum(values)
-    return enums

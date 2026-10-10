@@ -13,5 +13,6 @@ chmod +x ninja
 cp ninja /usr/local/bin/
 cd xgboost/
 cmake -B build -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo -GNinja
+cmake -B build -S . -DUSE_CUDA=ON -GNinja
 cd build && ninja
 ```
