@@ -1,7 +1,6 @@
 """Functions extracted from criteo.ipynb."""
 
 import functools
-import json
 import operator
 from pathlib import Path
 
@@ -76,7 +75,6 @@ def get_data(config, data_dir, to_numeric: bool):
         train = cast_enums(merge_rare(train, cat_encode), enums)
         valid = cast_enums(merge_rare(valid, cat_encode), enums)
         test = cast_enums(merge_rare(train, cat_encode), enums)
-    print(train.columns)
     train_X, train_y = get_data_XY(train)
     valid_X, valid_y = get_data_XY(valid)
     test_X, test_y = get_data_XY(test)
@@ -287,64 +285,6 @@ def get_data_XY(data):
     data_X = data.drop(["Row", "Label"], strict=False).collect()
     data_y = data.select("Label").collect().to_series()
     return data_X, data_y
-
-
-def get_tree_statistics(model):
-    """Compute per-node gradient/hessian stats and expected gain for an XGBoost model.
-
-    Walks each tree bottom-up from `booster.trees_to_dataframe()` to reconstruct each
-    node's summed gradient `G` and hessian `H` (leaves from Gain/Cover, internal nodes
-    from their children), then derives `Metric` (= G^2 / (H + lambda)) and
-    `Gain_Expected` (the metric gain from splitting vs. not) per node.
-
-    Args:
-        model: a fitted XGBoost sklearn model (e.g. XGBClassifier).
-
-    Returns:
-        A polars DataFrame with one row per tree node, including `G`, `H`, `Metric`
-        and `Gain_Expected` columns, concatenated across all trees.
-    """
-    booster = model.get_booster()
-    df = pl.from_pandas(booster.trees_to_dataframe())
-
-    lam = float(
-        json.loads(booster.save_config())["learner"]["gradient_booster"][
-            "tree_train_param"
-        ]["lambda"]
-    )
-    eta = float(
-        json.loads(booster.save_config())["learner"]["gradient_booster"][
-            "tree_train_param"
-        ]["eta"]
-    )
-    df = df.with_columns(H=pl.col("Cover"))  # hessian sum, valid for every row
-    is_leaf = pl.col("Feature") == "Leaf"
-    df = df.with_columns(
-        G=pl.when(is_leaf).then(-pl.col("Gain") * pl.col("H") + lam) / eta
-    )
-    tdfs = {}
-    for tree_id, tdf in df.sort("Node", descending=True).group_by("Tree"):
-        print(tree_id)
-        g = dict(zip(tdf["ID"], tdf["G"]))
-
-        intermediate_node = tdf.filter(~is_leaf)
-        for row in intermediate_node.iter_rows(named=True):
-            g[row["ID"]] = (
-                g[row["Yes"]] + g[row["No"]]
-            )  # missing already folds into Yes/No
-        tdf = tdf.with_columns(G=pl.col("ID").replace_strict(g)).with_columns(
-            Metric=pl.col("G") ** 2 / (pl.col("H") + lam)
-        )
-        metric = dict(zip(tdf["ID"], tdf["Metric"]))
-        tdf = tdf.with_columns(
-            pl.col(["Yes", "No"]).replace_strict(metric).name.prefix("Metric_")
-        ).with_columns(
-            Gain_Expected=pl.col("Metric_Yes") + pl.col("Metric_No") - pl.col("Metric")
-        )
-
-        tdfs[tree_id] = tdf
-    df = pl.concat(tdfs.values())
-    return df
 
 
 def create_expression(pairs):
