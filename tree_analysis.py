@@ -63,8 +63,30 @@ def get_tree_statistics(model: xgb.XGBModel):
 
 
 def add_level(df):
-    df_roots = df.filter(pl.col("Node") == 0)
-    df_roots["Level"] = 0
-    id_next = df.select(["Yes", "No"]).unpivot(on=["Yes", "No"])
-    ### WIP
-    return id_next
+    all_nodes = []
+    level = 0
+    trees = df
+    trees = trees.with_columns(is_parent=pl.col("Node") == 0)
+    while len(trees) > 0:
+        print(f"level {level} trees len: {len(trees)}")
+        trees_parent_child = trees.partition_by("is_parent", as_dict=True)
+        trees_parent = trees_parent_child[(True,)]
+        nodes = trees_parent.select(
+            ["ID", "Tree", "Node", pl.lit(level).alias("Level")]
+        )
+        all_nodes.append(nodes)
+        trees = trees_parent_child.get((False,))
+        if trees is None:
+            break
+        level += 1
+        child_nodes = (
+            trees_parent.select(["Yes", "No"])
+            .unpivot(variable_name="Branch", value_name="ID")
+            .drop_nulls()
+        )
+        trees = trees.with_columns(
+            is_parent=pl.col("ID").is_in(child_nodes["ID"].to_list())
+        )
+    all_nodes = pl.concat(all_nodes)
+    df = df.join(all_nodes.select(["ID", "Level"]), on="ID")
+    return df
