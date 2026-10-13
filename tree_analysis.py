@@ -39,7 +39,6 @@ def get_tree_statistics(model: xgb.XGBModel):
     )
     tdfs = {}
     for tree_id, tdf in df.sort("Node", descending=True).group_by("Tree"):
-        print(tree_id)
         g = dict(zip(tdf["ID"], tdf["G"]))
 
         intermediate_node = tdf.filter(~is_leaf)
@@ -68,7 +67,6 @@ def add_level(df):
     trees = df
     trees = trees.with_columns(is_parent=pl.col("Node") == 0)
     while len(trees) > 0:
-        print(f"level {level} trees len: {len(trees)}")
         trees_parent_child = trees.partition_by("is_parent", as_dict=True)
         trees_parent = trees_parent_child[(True,)]
         nodes = trees_parent.select(
