@@ -19,9 +19,34 @@ cd python-package/
 uv pip install -e .
 uv pip install wandb_workspaces matplotlib
 echo $PATH
-python -m ipykernel install --user --name=myenv
+source /opt/.venvs/ML/bin/activate
+python -m ipykernel install --user --name=ML
 ```
 download ninja
 
-```
-```
+
+A100 SXM
+
+$1.79/hr
+80GB VRAM
+5 max
+
+117GB RAM
+
+•
+
+16 vCPU
+
+A100 SXM1x
+
+vCPU
+
+16 (AMD EPYC 7742 64-Core Processor)
+
+Memory
+
+250 GB
+
+Container disk
+
+25 GB
