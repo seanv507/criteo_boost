@@ -61,24 +61,21 @@ def get_data(config, data_dir, to_numeric: bool):
     split into X and y
     """
     train, valid, test = load_data(config["sample_every"], data_dir)
-
-    train = fill_missing(train, CAT_COLS, "missing")
-    valid = fill_missing(valid, CAT_COLS, "missing")
-    test = fill_missing(test, CAT_COLS, "missing")
-    cat_encode, _gm = calc_cat_encode(train, config, CAT_COLS)
+    datasets = [train, valid, test]
+    for i_dataset, dataset in enumerate(datasets):
+        datasets[i_dataset] = fill_missing(dataset, CAT_COLS, "missing")
+    cat_encode, _gm = calc_cat_encode(datasets[0], config, CAT_COLS)
     if to_numeric:
-        train = encode_cats(train, cat_encode, CAT_COLS)
-        valid = encode_cats(valid, cat_encode, CAT_COLS)
-        test = encode_cats(test, cat_encode, CAT_COLS)
+        for i_dataset, dataset in enumerate(datasets):
+            datasets[i_dataset] = encode_cats(dataset, cat_encode, CAT_COLS)
     else:
         enums = create_enums(cat_encode)
-        train = cast_enums(merge_rare(train, cat_encode), enums)
-        valid = cast_enums(merge_rare(valid, cat_encode), enums)
-        test = cast_enums(merge_rare(train, cat_encode), enums)
-    train_X, train_y = get_data_XY(train)
-    valid_X, valid_y = get_data_XY(valid)
-    test_X, test_y = get_data_XY(test)
-    return train_X, train_y, valid_X, valid_y, test_X, test_y
+        for i_dataset, dataset in enumerate(datasets):
+            datasets[i_dataset] = cast_enums(merge_rare(dataset, cat_encode), enums)
+    for i_dataset, dataset in enumerate(datasets):
+        datasets[i_dataset] = get_data_XY(dataset)
+    train, valid, test = datasets
+    return train, valid, test
 
 
 def load_data(sample_every, data_dir):
