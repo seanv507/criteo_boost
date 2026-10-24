@@ -16,7 +16,7 @@ dependencies = [
     "cudf-polars-cu13",
     "pyarrow>=24.0.0",
     "scikit-learn>=1.9.0",
-    "wandb>=0.28.0",
+    "wandb>=0.31",
     "wandb-workspaces>=0.4.5",
     "xgboost>=3.3.0",
     "xlsxwriter>=3.2.9",

@@ -217,7 +217,7 @@ def one_at_a_time(grid, params):
 
 def replace_strings(name: str):
     replacements = {
-        "config.": "",
+        # "config.": "",
         "learner.gradient_booster.tree_train_param.": "",
         "learner.learner_model_param.": "",
         "summary_metrics.validation_1-logloss.min": "validation log loss",
