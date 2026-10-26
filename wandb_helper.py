@@ -154,11 +154,13 @@ def unnest_full(df, separator=".", exclude=None):
     return df_flatten
 
 
-def cast_datetimes(df: pl.DataFrame) -> pl.DataFrame:
+def convert_datetimes(df: pl.DataFrame) -> pl.DataFrame:
+    runtimes = [c for c in df.columns if c.endswith("runtime")]
     df = df.with_columns(
-        pl.from_epoch(cs.ends_with("timestamp")),
-        cs.ends_with("created_at").str.to_datetime("%+"),
+        pl.from_epoch(cs.string() & cs.ends_with("timestamp")),
+        (cs.string() & cs.ends_with("created_at")).str.to_datetime("%+"),
     )
+    df = df.with_columns([pl.duration(seconds=pl.col(c)).alias(c) for c in runtimes])
     return df
 
 
