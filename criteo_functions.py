@@ -54,7 +54,7 @@ def create_ctr(df, cols):
     return df_ctr
 
 
-def get_data(config, data_dir, to_numeric: bool):
+def get_data(config, data_dir):
     """load data from data_dir, sampling every config['sample_every']
     add missing category
     encode categoricals using target encoding
@@ -65,7 +65,8 @@ def get_data(config, data_dir, to_numeric: bool):
     for i_dataset, dataset in enumerate(datasets):
         datasets[i_dataset] = fill_missing(dataset, CAT_COLS, "missing")
     cat_encode, _gm = calc_cat_encode(datasets[0], config, CAT_COLS)
-    if to_numeric:
+
+    if config.get("cat_order") == "target":
         for i_dataset, dataset in enumerate(datasets):
             datasets[i_dataset] = encode_cats(dataset, cat_encode, CAT_COLS)
     else:
