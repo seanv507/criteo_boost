@@ -6,13 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 An experimentation repo for training an XGBoost click-through-rate (CTR) model on the
 Criteo display-advertising dataset, plus supporting analysis of frequent itemsets /
-association rules and of the resulting trees. `criteo_functions.py` holds the reusable,
-unit-tested pieces; the work itself is split across three notebooks:
+association rules and of the resulting trees. `criteo_functions.py` holds the reusable
+pieces (data pipeline, rule parsing, and the `train()` sweep entry point) and doubles as
+a runnable wandb sweep-agent script; `tree_analysis.py` holds the tree-inspection
+helpers. The interactive work is split across three notebooks:
 
 - `criteo_train.ipynb` — the minimal path to load/encode data and train a model (a
-  single fit, a GPU variant, and a wandb hyperparameter sweep). Defines its own
-  `train()` (the sweep-agent entry point) locally rather than importing it, since it's
-  only ever used here.
+  single fit, a GPU variant, and a wandb hyperparameter sweep using `train()` from
+  `criteo_functions`). Ends with a `stop_self()` helper that stops the current RunPod
+  pod via its REST API (needs `RUNPOD_POD_ID`/`RUNPOD_API_KEY`).
 - `criteo_analysis.ipynb` — everything else: exploratory analysis, frequent-itemset/
   association-rule mining, and tree-structure inspection. This one is a preserved
   scratchpad, not a clean pipeline — several cells are known-broken (undefined
@@ -33,7 +35,12 @@ Dependency management is via `uv` (Python `3.14`, pinned in `.python-version`;
 uv sync                 # install/update the environment
 uv run jupyter lab      # open the notebooks (criteo_train.ipynb / criteo_analysis.ipynb / wandb_report.ipynb)
 uv run pytest           # run the test suite
-uv run pytest tests/test_criteo_functions.py::test_transform_cat_smoothing_and_cutoff -q  # single test
+uv run pytest tests/test_criteo_functions.py::test_create_expression_single_pair -q  # single test
+
+# run a wandb sweep agent headless (e.g. on a GPU pod); all three env vars are required
+export WANDB_PROJECT=criteo_boost_gpu_categorical WANDB_AGENT_RUNS=10
+export WANDB_SWEEP_CONFIG="$(cat sweep.yaml)"   # multiline YAML sweep config
+uv run python criteo_functions.py
 ```
 
 To build the custom GPU-enabled XGBoost fork used for some experiments
@@ -46,26 +53,36 @@ in `python-package/`, then `cmake -GNinja` + `ninja` for the C++ side).
 notebook into this module (see git history) so they're importable, testable, and
 shared between `criteo_train.ipynb` and `criteo_analysis.ipynb`, both of which do
 `from criteo_functions import *` rather than redefining anything inline. When editing
-shared logic, change it here, not by re-adding a copy in a notebook. Two exceptions
-were deliberately moved back *out* of this module and into the one notebook that
-actually uses them, rather than being shared: `train()` (now defined directly in
-`criteo_train.ipynb`) and `get_project_sweep_ids()` (now defined directly in
-`wandb_report.ipynb`) — neither is unit-tested for the same reason.
+shared logic, change it here, not by re-adding a copy in a notebook. The one exception
+is `get_project_sweep_ids()`, deliberately kept in `wandb_report.ipynb` (the only place
+it's used). `train()` was briefly moved into `criteo_train.ipynb` but now lives back in
+this module so the same entry point serves both the notebook and the headless
+`__main__` sweep script.
 
-**Data pipeline** (`load_data` → `fill_missing` → `calc_cat_encode`/`transform_cat` →
-`encode_cats` → `get_data_XY`, orchestrated by `get_data`): Criteo train/valid/test
-parquet files have integer features `I1`-`I13`, categorical features `C1`-`C26`, and a
-binary `Label`. Categoricals are not one-hot/enum encoded for the model — they're
-target-encoded via a smoothed CTR (`transform_cat`: rare categories below a count
-cutoff are pooled into one "rest" bucket; kept categories get
+The `__main__` block reads `WANDB_PROJECT` (project name), `WANDB_AGENT_RUNS` (int,
+`count` for `wandb.agent`) and `WANDB_SWEEP_CONFIG` (a YAML mapping, parsed with
+`yaml.safe_load`) from the environment — no defaults, a missing variable raises
+`KeyError` — then calls `wandb.sweep` + `wandb.agent(sweep_id, train, count=...)`.
+
+**Data pipeline** (`load_data` → `fill_missing` → `calc_cat_encode`/`calc_cat_smooth_ctr`
+→ encode, then `get_data_XY`, orchestrated by `get_data(config, data_dir)`): Criteo
+train/valid/test parquet files have integer features `I1`-`I13`, categorical features
+`C1`-`C26`, and a binary `Label`. `calc_cat_smooth_ctr` fits a smoothed CTR per
+category: categories below `config['cat_cutoff']` rows are pooled into one "rest"
+bucket; kept categories get
 `ctr_smooth = (clicks + global_mean * pseudo_count) / (count + pseudo_count)`, shrinking
-low-count categories toward the global mean). The final model matrix keeps only
-`I*`, `*_encode`, and `ar_*` (association-rule) columns.
+low-count categories toward the global mean. How that's used depends on
+`config['cat_order']`:
+- `"target"` — `encode_cats` replaces each categorical with its smoothed-CTR diff
+  (target encoding).
+- anything else (`"node"`, `"tree"`, `"ohe"`, `None`) — `merge_rare` maps rare
+  categories to `"rare"` and `create_enums`/`cast_enums` cast columns to `pl.Enum`, for
+  XGBoost's native categorical support (`enable_categorical`).
 
-**Data location is external**, and not fully unified across the codebase. `load_data()`/
-`get_data()` in `criteo_functions.py` take an explicit `data_dir` parameter (default
-`../data/Criteo`, relative to CWD; `get_data` reads it from `config['data_dir']`), so
-`criteo_train.ipynb` sets it once at the top. `criteo_analysis.ipynb`'s exploratory
+**Data location is external**, and not fully unified across the codebase.
+`load_data()`/`get_data()` take a required `data_dir` (`Path`); callers get it from
+`get_data_dir()`, which returns `~/projects/data/Criteo` if it exists, else
+`/workspace/data/Criteo` (the RunPod layout). `criteo_analysis.ipynb`'s exploratory
 cells, however, still use several different hardcoded literal paths inherited from the
 original notebook (`~/projects/data/Criteo`, `/workspace/data/Criteo`, `../data/Criteo`)
 in direct `pl.scan_parquet`/`pl.read_parquet` calls — check which convention the
@@ -78,28 +95,37 @@ columns as `Label:x`/`Ci:value` token lines (`*_items.tsv`) for `eclat` to consu
 `parse_frequent`/`parse_association`, which build a `rules` column of polars filter
 expressions per itemset/rule using `create_expression`.
 
-**Tree analysis** (`get_tree_statistics`): reconstructs, per split node of a fitted
+**Tree analysis** (`tree_analysis.py`: `get_tree_statistics`, `add_level`): reconstructs, per split node of a fitted
 XGBoost booster, the summed gradient/hessian (`G`/`H`) bottom-up from
 `trees_to_dataframe()`, then derives an independent `Metric`/`Gain_Expected` per node —
 essentially a from-scratch reimplementation of XGBoost's internal gain calculation, used
 to sanity-check/explore it rather than for training.
 
 **Experiment tracking**: Weights & Biases, entity `seanv507`. Hyperparameter sweeps are
-run via `wandb.sweep(...)` + `wandb.agent(sweep_id, train)` in `criteo_train.ipynb`,
-where `train()` is the sweep entry point (reads hyperparams from `wandb.config`, fits
-an `XGBClassifier` with `WandbCallback`). `wandb_report.ipynb`'s
+run via `wandb.sweep(...)` + `wandb.agent(sweep_id, train)`, either interactively in
+`criteo_train.ipynb` or headless via `python criteo_functions.py` (see Commands).
+`train()` (in `criteo_functions.py`) is the sweep entry point: it builds a base config
+(GPU `hist`, `cat_order="tree"`, etc.), lets `wandb.config` override it with the sweep's
+hyperparameters, strips non-XGBoost keys (`sample_every`, `cat_cutoff`,
+`cat_pseudo_count`, and `cat_order` unless it's `node`/`tree`), and fits an
+`XGBClassifier` with `WandbCallback`. `wandb_report.ipynb`'s
 `get_project_sweep_ids()` queries the wandb API for every sweep across all projects
 under that entity, and `wandb_workspaces` is used there to build/publish Report pages
 summarizing sweep results.
 
 ## Testing notes
 
-`tests/test_criteo_functions.py` covers every function currently in
-`criteo_functions.py`. `get_project_sweep_ids` (needs a live wandb API call) and
-`train` (tied to global sweep config) are untested by design — and live in
-`wandb_report.ipynb`/`criteo_train.ipynb` respectively rather than in this module, so
-they aren't importable for testing anyway. Tests use small synthetic polars
-frames/parquet files rather than the real Criteo dataset — `load_data` and `get_data`
-are tested via `monkeypatch` (chdir for `load_data`'s hardcoded relative path;
-`monkeypatch.setattr(cf, "load_data", ...)` for `get_data`) so the suite never touches
-the external data directory.
+`tests/test_criteo_functions.py` uses small synthetic polars frames/parquet files rather
+than the real Criteo dataset, and `monkeypatch` (`chdir`, `setattr(cf, "load_data",
+...)`) so it never touches the external data directory. `train()`, the `__main__`
+sweep script, and `get_project_sweep_ids` (live wandb calls) are untested by design.
+
+**The suite is currently out of date and does not run:**
+- `uv run pytest` fails at collection with `ModuleNotFoundError: No module named
+  'criteo_functions'` (the repo root isn't on `sys.path`; there's no
+  `conftest.py`/`pythonpath` setting).
+- Even once importable, it targets an older API: it calls `cf.transform_cat` (now
+  `calc_cat_smooth_ctr`) and `cf.get_tree_statistics` (now in `tree_analysis.py`), calls
+  `load_data` without `data_dir`, and calls `get_data(config)` expecting six return
+  values (it now takes `data_dir` and returns three `(X, y)` pairs).
+- `merge_rare`, `create_enums`, `cast_enums` and `get_data_dir` have no tests.
