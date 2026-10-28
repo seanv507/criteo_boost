@@ -13,8 +13,8 @@ helpers. The interactive work is split across three notebooks:
 
 - `criteo_train.ipynb` — the minimal path to load/encode data and train a model (a
   single fit, a GPU variant, and a wandb hyperparameter sweep using `train()` from
-  `criteo_functions`). Ends with a `stop_self()` helper that stops the current RunPod
-  pod via its REST API (needs `RUNPOD_POD_ID`/`RUNPOD_API_KEY`).
+  `criteo_functions`). Ends by calling `stop_self()` (from `criteo_functions`), which
+  stops the current RunPod pod via its REST API (needs `RUNPOD_POD_ID`/`RUNPOD_API_KEY`).
 - `criteo_analysis.ipynb` — everything else: exploratory analysis, frequent-itemset/
   association-rule mining, and tree-structure inspection. This one is a preserved
   scratchpad, not a clean pipeline — several cells are known-broken (undefined
@@ -63,6 +63,8 @@ The `__main__` block reads `WANDB_PROJECT` (project name), `WANDB_AGENT_RUNS` (i
 `count` for `wandb.agent`) and `WANDB_SWEEP_CONFIG` (a YAML mapping, parsed with
 `yaml.safe_load`) from the environment — no defaults, a missing variable raises
 `KeyError` — then calls `wandb.sweep` + `wandb.agent(sweep_id, train, count=...)`.
+If the optional `NTFY_TOPIC` is set, `notify()` pushes an ntfy.sh message when the
+agent finishes or crashes (the free W&B plan has no alerts); `notify()` never raises.
 
 **Data pipeline** (`load_data` → `fill_missing` → `calc_cat_encode`/`calc_cat_smooth_ctr`
 → encode, then `get_data_XY`, orchestrated by `get_data(config, data_dir)`): Criteo

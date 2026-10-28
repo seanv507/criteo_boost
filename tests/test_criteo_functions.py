@@ -303,6 +303,40 @@ def test_select_inputs_unknown_column_raises():
 
 
 # ---------------------------------------------------------------------------
+# notify
+# ---------------------------------------------------------------------------
+
+
+def test_notify_noop_without_topic(monkeypatch):
+    monkeypatch.delenv("NTFY_TOPIC", raising=False)
+    monkeypatch.setattr(cf.requests, "post", lambda *a, **k: pytest.fail("posted"))
+    cf.notify("done")
+
+
+def test_notify_posts_to_topic(monkeypatch):
+    monkeypatch.setenv("NTFY_TOPIC", "my-topic")
+    calls = []
+    monkeypatch.setattr(cf.requests, "post", lambda url, **k: calls.append((url, k)))
+    cf.notify("done", title="T")
+    assert calls == [
+        (
+            "https://ntfy.sh/my-topic",
+            {"data": b"done", "headers": {"Title": "T"}, "timeout": 10},
+        )
+    ]
+
+
+def test_notify_swallows_request_errors(monkeypatch):
+    monkeypatch.setenv("NTFY_TOPIC", "my-topic")
+
+    def boom(*a, **k):
+        raise cf.requests.ConnectionError("offline")
+
+    monkeypatch.setattr(cf.requests, "post", boom)
+    cf.notify("done")  # must not raise
+
+
+# ---------------------------------------------------------------------------
 # create_expression
 # ---------------------------------------------------------------------------
 

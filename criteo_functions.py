@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import polars as pl
+import requests
 import xgboost as xgb
 import yaml
 from polars import selectors as cs
@@ -424,7 +425,6 @@ def train():
         "max_depth": 60,
         "device": "gpu",
         "tree_method": "hist",
-        "grow_policy": "lossguide",  # depthwise or lossguide
         "early_stopping_rounds": 10,
         "max_bin": 256,
         "subsample": 1.0,
@@ -433,7 +433,7 @@ def train():
     config["cat_order"] = "tree"
     config["cat_cutoff"] = 100
     config["reg_lambda"] = 10
-    config["cat_pseudo_count"] = 16  # equivalent to cat_reg_lambda
+
     config["inputs"] = "all"  # see select_inputs, e.g. "ints", "cats", "ints,C1"
 
     config["enable_categorical"] = config["cat_order"] in ["node", "tree", "ohe"]
@@ -443,7 +443,7 @@ def train():
         config["max_cat_threshold"] = 1_000_000
         config["max_cat_to_onehot"] = 10
     elif config["cat_order"] == "target":
-        pass
+        config["cat_pseudo_count"] = 16  # equivalent to cat_reg_lambda
     elif config["cat_order"] == "ohe":
         config["max_cat_threshold"] = 64
         config["max_cat_to_onehot"] = 4_294_967_295
@@ -475,11 +475,60 @@ def train():
         )
 
 
+def stop_self():
+    # Automatically pull the active Pod ID and API key from environment variables
+    pod_id = os.environ.get("RUNPOD_POD_ID")
+    api_key = os.environ.get("RUNPOD_API_KEY")
+
+    if not pod_id or not api_key:
+        print(
+            "Error: RUNPOD_POD_ID or RUNPOD_API_KEY environment variables are missing."
+        )
+        return
+
+    print(f"Attempting to stop pod: {pod_id}...")
+
+    # RunPod REST API Endpoint to stop a pod
+    url = f"https://rest.runpod.io/v1/pods/{pod_id}/stop"
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    try:
+        response = requests.post(url, headers=headers)
+        if response.status_code == 200:
+            print("Successfully requested pod shutdown!")
+        else:
+            print(
+                f"Failed to stop pod. Status code: {response.status_code}, Response: {response.text}"
+            )
+    except requests.RequestException as e:
+        print(f"An error occurred: {e}")
+
+
+def notify(message, title="criteo_boost"):
+    """Push `message` to the ntfy.sh topic in NTFY_TOPIC; no-op if it's unset.
+
+    Never raises: a failed notification shouldn't take down a training job.
+    """
+    topic = os.environ.get("NTFY_TOPIC")
+    if not topic:
+        return
+    try:
+        requests.post(
+            f"https://ntfy.sh/{topic}",
+            data=message.encode(),
+            headers={"Title": title},
+            timeout=10,
+        )
+    except requests.RequestException as e:
+        print(f"ntfy notification failed: {e}")
+
+
 if __name__ == "__main__":
     # All settings come from the environment:
     #   WANDB_PROJECT      - W&B project name
     #   WANDB_AGENT_RUNS   - number of runs this agent executes
     #   WANDB_SWEEP_CONFIG - sweep configuration as a (multiline) YAML string
+    #   NTFY_TOPIC         - optional ntfy.sh topic notified when the agent exits
     project = os.environ["WANDB_PROJECT"]
     agent_count = int(os.environ["WANDB_AGENT_RUNS"])
     sweep_configuration = yaml.safe_load(os.environ["WANDB_SWEEP_CONFIG"])
@@ -490,4 +539,9 @@ if __name__ == "__main__":
     sweep_id = wandb.sweep(sweep=sweep_configuration, project=project)
 
     # Start the sweep job
-    wandb.agent(sweep_id, function=train, count=agent_count)
+    try:
+        wandb.agent(sweep_id, function=train, count=agent_count)
+    except BaseException as e:
+        notify(f"Sweep {project}/{sweep_id} agent failed: {e!r}", title="Sweep failed")
+        raise
+    notify(f"Sweep {project}/{sweep_id} agent finished {agent_count} runs")
