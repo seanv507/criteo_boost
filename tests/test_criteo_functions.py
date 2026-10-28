@@ -1,9 +1,8 @@
 import math
+from pathlib import Path
 
-import numpy as np
 import polars as pl
 import pytest
-import xgboost as xgb
 
 import criteo_functions as cf
 
@@ -70,18 +69,18 @@ def test_fill_missing_custom_value():
 
 
 # ---------------------------------------------------------------------------
-# transform_cat
+# calc_cat_smooth_ctr
 # ---------------------------------------------------------------------------
 
 
-def test_transform_cat_smoothing_and_cutoff():
+def test_calc_cat_smooth_ctr_smoothing_and_cutoff():
     df = pl.LazyFrame(
         {
             "cat": ["a", "a", "a", "a", "a", "b", "b", "c"],
             "Label": [1, 1, 0, 0, 0, 1, 0, 1],
         }
     )
-    df_ctr, rest, global_mean = cf.transform_cat(
+    df_ctr, rest, global_mean = cf.calc_cat_smooth_ctr(
         df, "cat", "Label", cutoff=2, pseudo_count=2
     )
     df_ctr = df_ctr.collect()
@@ -111,9 +110,9 @@ def test_transform_cat_smoothing_and_cutoff():
     )
 
 
-def test_transform_cat_all_rare_categories_pooled():
+def test_calc_cat_smooth_ctr_all_rare_categories_pooled():
     df = pl.LazyFrame({"cat": ["a", "b", "c"], "Label": [1, 0, 1]})
-    df_ctr, rest, global_mean = cf.transform_cat(
+    df_ctr, rest, global_mean = cf.calc_cat_smooth_ctr(
         df, "cat", "Label", cutoff=10, pseudo_count=1
     )
     assert df_ctr.collect().is_empty()
@@ -158,11 +157,14 @@ def test_encode_cats_joins_and_fills_unmatched_with_zero():
         "C1": pl.DataFrame({"C1": ["a", "b"], "ctr_smooth_diff": [0.1, -0.2]}),
     }
     df = pl.LazyFrame({"C1": ["a", "b", "c"], "Label": [1, 0, 1]})
-    out = cf.encode_cats(df, cat_encode, ["C1"]).collect()
+    out = cf.encode_cats(df, cat_encode, ["C1"]).collect().sort("C1")
 
-    assert "C1" not in out.columns
-    assert "C1_encode" in out.columns
-    assert out["C1_encode"].to_list() == pytest.approx([0.1, -0.2, 0.0])
+    # the encoded value replaces the category under the original column name
+    assert set(out.columns) == {"C1", "Label"}
+    assert out["C1"].dtype == pl.Float64
+    assert out["C1"].to_list() == pytest.approx([-0.2, 0.0, 0.1])
+    # row order is not preserved by the join, so check the label alignment too
+    assert out["Label"].to_list() == [0, 1, 1]
 
 
 def test_encode_cats_multiple_columns():
@@ -172,8 +174,50 @@ def test_encode_cats_multiple_columns():
     }
     df = pl.LazyFrame({"C1": ["a"], "C2": ["x"], "Label": [1]})
     out = cf.encode_cats(df, cat_encode, ["C1", "C2"]).collect()
-    assert out["C1_encode"].to_list() == [0.5]
-    assert out["C2_encode"].to_list() == [-0.5]
+    assert out["C1"].to_list() == [0.5]
+    assert out["C2"].to_list() == [-0.5]
+
+
+# ---------------------------------------------------------------------------
+# merge_rare / create_enums / cast_enums
+# ---------------------------------------------------------------------------
+
+
+def _cat_encode_with_rest():
+    # shape produced by calc_cat_encode: kept categories plus a null-category "rest" row
+    return {
+        "C1": pl.DataFrame(
+            {
+                "C1": ["a", "b", None],
+                "count": [5, 9, 2],
+                "ctr_smooth_diff": [0.1, 0.2, None],
+            }
+        ),
+    }
+
+
+def test_merge_rare_maps_unknown_categories_to_rare():
+    df = pl.LazyFrame({"C1": ["a", "b", "zzz"], "Label": [1, 0, 1]})
+    out = cf.merge_rare(df, _cat_encode_with_rest()).collect()
+    assert out["C1"].to_list() == ["a", "b", "rare"]
+    assert out["Label"].to_list() == [1, 0, 1]
+
+
+def test_create_enums_orders_by_count_and_appends_rare():
+    enums = cf.create_enums(_cat_encode_with_rest())
+    assert set(enums.keys()) == {"C1"}
+    assert isinstance(enums["C1"], pl.Enum)
+    # null "rest" row dropped, most frequent first, "rare" last
+    assert enums["C1"].categories.to_list() == ["b", "a", "rare"]
+
+
+def test_cast_enums_casts_columns():
+    enums = cf.create_enums(_cat_encode_with_rest())
+    df = pl.LazyFrame({"C1": ["a", "rare", "b"], "I1": [1.0, 2.0, 3.0]})
+    out = cf.cast_enums(df, enums).collect()
+    assert out["C1"].dtype == enums["C1"]
+    assert out["C1"].to_list() == ["a", "rare", "b"]
+    assert out["I1"].dtype == pl.Float64
 
 
 # ---------------------------------------------------------------------------
@@ -181,21 +225,20 @@ def test_encode_cats_multiple_columns():
 # ---------------------------------------------------------------------------
 
 
-def test_get_data_xy_selects_expected_columns():
+def test_get_data_xy_drops_row_and_label():
     df = pl.LazyFrame(
         {
             "Row": [0, 1],
             "Label": [1, 0],
             "I1": [1.0, 2.0],
             "I2": [3.0, 4.0],
-            "C1_encode": [0.1, 0.2],
-            "ar_flag": [1, 0],
+            "C1": [0.1, 0.2],
             "other": ["x", "y"],
         }
     )
     data_X, data_y = cf.get_data_XY(df)
 
-    assert set(data_X.columns) == {"I1", "I2", "C1_encode", "ar_flag"}
+    assert set(data_X.columns) == {"I1", "I2", "C1", "other"}
     assert data_y.to_list() == [1, 0]
     assert data_X.height == 2
 
@@ -205,51 +248,6 @@ def test_get_data_xy_works_without_row_column():
     data_X, data_y = cf.get_data_XY(df)
     assert data_X.columns == ["I1"]
     assert data_y.to_list() == [1]
-
-
-# ---------------------------------------------------------------------------
-# get_tree_statistics
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(scope="module")
-def fitted_classifier():
-    rng = np.random.default_rng(0)
-    X = rng.normal(size=(200, 4))
-    y = (X[:, 0] + X[:, 1] > 0).astype(int)
-    clf = xgb.XGBClassifier(n_estimators=3, max_depth=2, tree_method="hist")
-    clf.fit(X, y)
-    return clf
-
-
-def test_get_tree_statistics_schema_and_row_count(fitted_classifier):
-    stats = cf.get_tree_statistics(fitted_classifier)
-    raw = fitted_classifier.get_booster().trees_to_dataframe()
-
-    assert stats.height == len(raw)
-    for col in ("G", "H", "Metric", "Metric_Yes", "Metric_No", "Gain_Expected"):
-        assert col in stats.columns
-
-
-def test_get_tree_statistics_gradient_additivity(fitted_classifier):
-    """An internal node's G must equal the sum of G at its two children."""
-    stats = cf.get_tree_statistics(fitted_classifier)
-    g_by_id = dict(zip(stats["ID"], stats["G"]))
-    internal = stats.filter(pl.col("Feature") != "Leaf")
-
-    assert internal.height > 0
-    for row in internal.iter_rows(named=True):
-        assert row["G"] == pytest.approx(g_by_id[row["Yes"]] + g_by_id[row["No"]])
-
-
-def test_get_tree_statistics_gain_expected_consistent(fitted_classifier):
-    stats = cf.get_tree_statistics(fitted_classifier)
-    metric_by_id = dict(zip(stats["ID"], stats["Metric"]))
-    internal = stats.filter(pl.col("Feature") != "Leaf")
-
-    for row in internal.iter_rows(named=True):
-        expected = metric_by_id[row["Yes"]] + metric_by_id[row["No"]] - row["Metric"]
-        assert row["Gain_Expected"] == pytest.approx(expected)
 
 
 # ---------------------------------------------------------------------------
@@ -357,38 +355,37 @@ def test_build_categorical_enums_multiple_columns(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_load_data_subsamples_train_only(tmp_path, monkeypatch):
-    data_dir = tmp_path / "data" / "Criteo"
+def test_load_data_subsamples_train_only(tmp_path):
+    data_dir = tmp_path / "somewhere" / "else"
     data_dir.mkdir(parents=True)
     pl.DataFrame({"x": list(range(6))}).write_parquet(data_dir / "train.parquet")
     pl.DataFrame({"x": list(range(3))}).write_parquet(data_dir / "valid.parquet")
     pl.DataFrame({"x": list(range(2))}).write_parquet(data_dir / "test.parquet")
 
-    workdir = tmp_path / "workdir"
-    workdir.mkdir()
-    monkeypatch.chdir(workdir)
-
-    train, valid, test = cf.load_data(sample_every=2)
-
-    train_df = train.collect()
-    assert train_df.height == 3
-    assert train_df["x"].to_list() == [0, 2, 4]
-    assert valid.collect().height == 3
-    assert test.collect().height == 2
-
-
-def test_load_data_accepts_explicit_data_dir(tmp_path):
-    data_dir = tmp_path / "somewhere" / "else"
-    data_dir.mkdir(parents=True)
-    pl.DataFrame({"x": list(range(4))}).write_parquet(data_dir / "train.parquet")
-    pl.DataFrame({"x": list(range(3))}).write_parquet(data_dir / "valid.parquet")
-    pl.DataFrame({"x": list(range(2))}).write_parquet(data_dir / "test.parquet")
-
     train, valid, test = cf.load_data(sample_every=2, data_dir=data_dir)
 
-    assert train.collect()["x"].to_list() == [0, 2]
+    train_df = train.collect()
+    assert train_df["x"].to_list() == [0, 2, 4]
+    assert train_df["Row"].to_list() == [0, 2, 4]
     assert valid.collect().height == 3
     assert test.collect().height == 2
+
+
+# ---------------------------------------------------------------------------
+# get_data_dir
+# ---------------------------------------------------------------------------
+
+
+def test_get_data_dir_prefers_home_projects_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    home_dir = tmp_path / "projects" / "data" / "Criteo"
+    home_dir.mkdir(parents=True)
+    assert cf.get_data_dir() == home_dir
+
+
+def test_get_data_dir_falls_back_to_workspace(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))  # no ~/projects/data/Criteo here
+    assert cf.get_data_dir() == Path("/workspace/data/Criteo")
 
 
 # ---------------------------------------------------------------------------
@@ -411,26 +408,60 @@ def _synthetic_split(n_rows, offset=0):
     return pl.LazyFrame(data)
 
 
-def test_get_data_produces_expected_shapes(monkeypatch):
-    train, valid, test = (
+@pytest.fixture
+def patched_load_data(monkeypatch):
+    splits = (
         _synthetic_split(6),
         _synthetic_split(3, offset=100),
         _synthetic_split(2, offset=200),
     )
-    monkeypatch.setattr(
-        cf, "load_data", lambda sample_every, data_dir=None: (train, valid, test)
-    )
+    calls = []
 
-    config = {"sample_every": 1, "cat_cutoff": 1, "cat_pseudo_count": 1}
-    train_X, train_y, valid_X, valid_y, test_X, test_y = cf.get_data(config)
+    def fake_load_data(sample_every, data_dir):
+        calls.append((sample_every, data_dir))
+        return splits
 
-    expected_cols = {f"I{i}" for i in range(1, 14)} | {
-        f"C{i}_encode" for i in range(1, 27)
+    monkeypatch.setattr(cf, "load_data", fake_load_data)
+    return calls
+
+
+EXPECTED_COLS = set(cf.INTS) | set(cf.CAT_COLS)
+
+
+def _check_shapes(datasets):
+    (train_X, train_y), (valid_X, valid_y), (test_X, test_y) = datasets
+    for X, y, n in ((train_X, train_y, 6), (valid_X, valid_y, 3), (test_X, test_y, 2)):
+        assert set(X.columns) == EXPECTED_COLS
+        assert X.height == n
+        assert len(y) == n
+
+
+def test_get_data_target_encoding(patched_load_data):
+    config = {
+        "sample_every": 3,
+        "cat_cutoff": 1,
+        "cat_pseudo_count": 1,
+        "cat_order": "target",
     }
-    assert set(train_X.columns) == expected_cols
-    assert train_X.height == 6
-    assert len(train_y) == 6
-    assert valid_X.height == 3
-    assert len(valid_y) == 3
-    assert test_X.height == 2
-    assert len(test_y) == 2
+    datasets = cf.get_data(config, Path("some/dir"))
+
+    assert patched_load_data == [(3, Path("some/dir"))]
+    _check_shapes(datasets)
+    train_X = datasets[0][0]
+    assert all(train_X[col].dtype == pl.Float64 for col in cf.CAT_COLS)
+
+
+def test_get_data_enum_encoding(patched_load_data):
+    config = {
+        "sample_every": 1,
+        "cat_cutoff": 1,
+        "cat_pseudo_count": 1,
+        "cat_order": "tree",
+    }
+    datasets = cf.get_data(config, Path("some/dir"))
+
+    _check_shapes(datasets)
+    train_X = datasets[0][0]
+    assert all(isinstance(train_X[col].dtype, pl.Enum) for col in cf.CAT_COLS)
+    # the null injected into C1 is filled as "missing" before encoding
+    assert "missing" in train_X["C1"].to_list()

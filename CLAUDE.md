@@ -115,17 +115,14 @@ summarizing sweep results.
 
 ## Testing notes
 
-`tests/test_criteo_functions.py` uses small synthetic polars frames/parquet files rather
-than the real Criteo dataset, and `monkeypatch` (`chdir`, `setattr(cf, "load_data",
-...)`) so it never touches the external data directory. `train()`, the `__main__`
-sweep script, and `get_project_sweep_ids` (live wandb calls) are untested by design.
+`tests/test_criteo_functions.py` and `tests/test_tree_analysis.py` cover every function
+in `criteo_functions.py` and `tree_analysis.py` except `train()`, the `__main__` sweep
+script, and `get_project_sweep_ids` (live wandb calls), which are untested by design.
+The modules are importable from tests via `pythonpath = ["."]` under
+`[tool.pytest.ini_options]` in `pyproject.toml`; they're top-level files, not a package.
 
-**The suite is currently out of date and does not run:**
-- `uv run pytest` fails at collection with `ModuleNotFoundError: No module named
-  'criteo_functions'` (the repo root isn't on `sys.path`; there's no
-  `conftest.py`/`pythonpath` setting).
-- Even once importable, it targets an older API: it calls `cf.transform_cat` (now
-  `calc_cat_smooth_ctr`) and `cf.get_tree_statistics` (now in `tree_analysis.py`), calls
-  `load_data` without `data_dir`, and calls `get_data(config)` expecting six return
-  values (it now takes `data_dir` and returns three `(X, y)` pairs).
-- `merge_rare`, `create_enums`, `cast_enums` and `get_data_dir` have no tests.
+Tests use small synthetic polars frames/parquet files rather than the real Criteo
+dataset, so the suite never touches the external data directory. `get_data` is tested
+with `monkeypatch.setattr(cf, "load_data", ...)`, once for each encoding path
+(`cat_order="target"` and an enum path). `get_data_dir` is tested by pointing `HOME` at
+a tmp dir.

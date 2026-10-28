@@ -239,7 +239,8 @@ def encode_cats(df, cat_encode, cat_cols):
         cat_cols: list of categorical column names to encode.
 
     Returns:
-        LazyFrame with each `cat` column replaced by a `{cat}_encode` column.
+        LazyFrame with each `cat` column's values replaced by its encoding (same
+        column name).
     """
     for cat in cat_cols:
         df = df.join(
@@ -285,7 +286,7 @@ def build_categorical_enums(
 
 
 def get_data_XY(data):
-    """prepare training data, select columns starting with I, ending with_encode or starting with ar_"""
+    """prepare training data: X is every column except Row/Label, y is Label"""
     data_X = data.drop(["Row", "Label"], strict=False).collect()
     data_y = data.select("Label").collect().to_series()
     return data_X, data_y

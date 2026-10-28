@@ -32,6 +32,10 @@ dev = [
     "ruff>=0.16.8",
 ]
 
+[tool.pytest.ini_options]
+# criteo_functions.py / tree_analysis.py are top-level modules, not an installed package
+pythonpath = ["."]
+
 [tool.ruff]
 target-version = "py314"
 # criteo_analysis.ipynb / wandb_report.ipynb are preserved scratchpads with
