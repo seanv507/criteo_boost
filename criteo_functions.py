@@ -301,6 +301,37 @@ def get_data_XY(data):
     return data_X, data_y
 
 
+INPUT_GROUPS = {"ints": INTS, "cats": CAT_COLS}
+
+
+def select_inputs(dfs, inputs="all"):
+    """Select the model input columns named by `inputs` from each frame in `dfs`.
+
+    `inputs` is a comma-separated string of tokens, each either a group name
+    (`ints` = I1-I13, `cats` = C1-C26, `all` = every column) or an exact column
+    name, e.g. "ints,C1,C5". Columns keep the order given, without duplicates.
+
+    Args:
+        dfs: sequence of (Lazy)Frames, e.g. (train_X, valid_X, test_X).
+        inputs: column spec string; None or "all" keeps every column.
+
+    Returns:
+        List of frames with only the selected columns.
+    """
+    if inputs is None:
+        return list(dfs)
+    tokens = [token.strip() for token in inputs.split(",") if token.strip()]
+    if not tokens:
+        raise ValueError(f"inputs {inputs!r} selects no columns")
+    if "all" in tokens:
+        return list(dfs)
+    cols = []
+    for token in tokens:
+        cols.extend(INPUT_GROUPS.get(token, [token]))
+    cols = list(dict.fromkeys(cols))
+    return [df.select(cols) for df in dfs]
+
+
 def create_expression(pairs):
     """Build a polars filter expression matching all (column, value) pairs.
 
@@ -403,6 +434,7 @@ def train():
     config["cat_cutoff"] = 100
     config["reg_lambda"] = 10
     config["cat_pseudo_count"] = 16  # equivalent to cat_reg_lambda
+    config["inputs"] = "all"  # see select_inputs, e.g. "ints", "cats", "ints,C1"
 
     config["enable_categorical"] = config["cat_order"] in ["node", "tree", "ohe"]
 
@@ -416,7 +448,7 @@ def train():
         config["max_cat_threshold"] = 64
         config["max_cat_to_onehot"] = 4_294_967_295
 
-    not_xgb_keys = ["sample_every", "cat_cutoff", "cat_pseudo_count"]
+    not_xgb_keys = ["sample_every", "cat_cutoff", "cat_pseudo_count", "inputs"]
     if config["cat_order"] not in ["node", "tree"]:
         not_xgb_keys.append("cat_order")
     with wandb.init(config=config) as _run:
@@ -426,8 +458,11 @@ def train():
         }
         data_dir = get_data_dir()
 
-        (train_X, train_y), (valid_X, valid_y), (_test_X, _test_y) = get_data(
+        (train_X, train_y), (valid_X, valid_y), (test_X, _test_y) = get_data(
             config, data_dir
+        )
+        train_X, valid_X, test_X = select_inputs(
+            [train_X, valid_X, test_X], config["inputs"]
         )
         clf = xgb.XGBClassifier(
             **config_xgb, callbacks=[WandbCallback(log_feature_importance=True)]

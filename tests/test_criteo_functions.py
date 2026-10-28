@@ -252,6 +252,57 @@ def test_get_data_xy_works_without_row_column():
 
 
 # ---------------------------------------------------------------------------
+# select_inputs
+# ---------------------------------------------------------------------------
+
+
+def _model_frames():
+    data = {col: [1.0] for col in cf.INTS} | {col: [0.5] for col in cf.CAT_COLS}
+    return [pl.DataFrame(data), pl.DataFrame(data)]
+
+
+@pytest.mark.parametrize(
+    ("inputs", "expected"),
+    [
+        ("ints", cf.INTS),
+        ("cats", cf.CAT_COLS),
+        ("ints,cats", cf.INTS + cf.CAT_COLS),
+        (" ints , C1,C5 ", cf.INTS + ["C1", "C5"]),
+        ("C5,I1", ["C5", "I1"]),
+        ("C1,cats", cf.CAT_COLS),  # duplicates dropped, first occurrence wins
+    ],
+)
+def test_select_inputs_groups_and_names(inputs, expected):
+    out = cf.select_inputs(_model_frames(), inputs)
+    assert len(out) == 2
+    for df in out:
+        assert df.columns == expected
+
+
+@pytest.mark.parametrize("inputs", ["all", None, "ints,all"])
+def test_select_inputs_all_keeps_every_column(inputs):
+    frames = _model_frames()
+    out = cf.select_inputs(frames, inputs)
+    assert [df.columns for df in out] == [df.columns for df in frames]
+
+
+def test_select_inputs_works_on_tuple_of_lazyframes():
+    frames = tuple(df.lazy() for df in _model_frames())
+    out = cf.select_inputs(frames, "I2")
+    assert [df.collect_schema().names() for df in out] == [["I2"], ["I2"]]
+
+
+def test_select_inputs_empty_spec_raises():
+    with pytest.raises(ValueError, match="selects no columns"):
+        cf.select_inputs(_model_frames(), " , ")
+
+
+def test_select_inputs_unknown_column_raises():
+    with pytest.raises(pl.exceptions.ColumnNotFoundError):
+        cf.select_inputs(_model_frames(), "ints,nope")
+
+
+# ---------------------------------------------------------------------------
 # create_expression
 # ---------------------------------------------------------------------------
 

@@ -107,8 +107,10 @@ run via `wandb.sweep(...)` + `wandb.agent(sweep_id, train)`, either interactivel
 `train()` (in `criteo_functions.py`) is the sweep entry point: it builds a base config
 (GPU `hist`, `cat_order="tree"`, etc.), lets `wandb.config` override it with the sweep's
 hyperparameters, strips non-XGBoost keys (`sample_every`, `cat_cutoff`,
-`cat_pseudo_count`, and `cat_order` unless it's `node`/`tree`), and fits an
-`XGBClassifier` with `WandbCallback`. `wandb_report.ipynb`'s
+`cat_pseudo_count`, `inputs`, and `cat_order` unless it's `node`/`tree`), restricts
+the feature matrices to `config["inputs"]` via `select_inputs` (comma-separated
+tokens: `ints`, `cats`, `all`, or exact column names, e.g. `"ints,C1,C5"`; default
+`"all"`), and fits an `XGBClassifier` with `WandbCallback`. `wandb_report.ipynb`'s
 `get_project_sweep_ids()` queries the wandb API for every sweep across all projects
 under that entity, and `wandb_workspaces` is used there to build/publish Report pages
 summarizing sweep results.
