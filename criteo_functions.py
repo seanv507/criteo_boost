@@ -63,16 +63,25 @@ def create_ctr(df, cols):
 def get_data(config, data_dir):
     """load data from data_dir, sampling every config['sample_every']
     add missing category
-    encode categoricals using target encoding
+    encode categoricals: target encoding if config['cat_order'] == 'target',
+    otherwise merge categories below config['cat_cutoff'] into "rare" and cast to enums
     split into X and y
+
+    config['cat_pseudo_count'] is only required for target encoding; the enum path
+    only uses category counts, so it defaults to 0 there.
     """
+    target_encode = config.get("cat_order") == "target"
+    pseudo_count = config["cat_pseudo_count"] if target_encode else 0
+
     train, valid, test = load_data(config["sample_every"], data_dir)
     datasets = [train, valid, test]
     for i_dataset, dataset in enumerate(datasets):
         datasets[i_dataset] = fill_missing(dataset, CAT_COLS, "missing")
-    cat_encode, _gm = calc_cat_encode(datasets[0], config, CAT_COLS)
+    cat_encode, _gm = calc_cat_encode(
+        datasets[0], CAT_COLS, config["cat_cutoff"], pseudo_count
+    )
 
-    if config.get("cat_order") == "target":
+    if target_encode:
         for i_dataset, dataset in enumerate(datasets):
             datasets[i_dataset] = encode_cats(dataset, cat_encode, CAT_COLS)
     else:
@@ -121,17 +130,17 @@ def fill_missing(df, cols, missing_val="missing"):
     return df
 
 
-def calc_cat_encode(df, config, cat_cols):
+def calc_cat_encode(df, cat_cols, cutoff, pseudo_count):
     """Fit a smoothed target-CTR encoding for each categorical column in `cat_cols`.
 
-    Calls `transform_cat` per column with `config['cat_cutoff']` and
-    `config['cat_pseudo_count']`, and stacks the per-category rows with the pooled
-    "rest" row into one table per column.
+    Calls `calc_cat_smooth_ctr` per column with `cutoff` and `pseudo_count`, and
+    stacks the per-category rows with the pooled "rest" row into one table per column.
 
     Args:
         df: LazyFrame containing categorical columns and a `Label` column.
-        config: dict with `cat_cutoff` and `cat_pseudo_count`.
         cat_cols: list of categorical column names to encode.
+        cutoff: minimum row count for a category to be kept on its own.
+        pseudo_count: smoothing prior strength (0 = raw CTR, no smoothing).
 
     Returns:
         (cat_encode, global_mean): cat_encode maps column name to its encoding
@@ -144,8 +153,8 @@ def calc_cat_encode(df, config, cat_cols):
             df,
             col,
             "Label",
-            cutoff=config["cat_cutoff"],
-            pseudo_count=config["cat_pseudo_count"],
+            cutoff=cutoff,
+            pseudo_count=pseudo_count,
         )
         cat_encode[col] = pl.concat(
             (cat_ctrs.collect(), rest_ctr.collect()), how="diagonal"

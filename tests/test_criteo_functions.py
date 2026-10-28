@@ -135,8 +135,9 @@ def test_calc_cat_encode_returns_one_table_per_column():
             "Label": [1, 0, 1, 0, 1],
         }
     )
-    config = {"cat_cutoff": 1, "cat_pseudo_count": 1}
-    cat_encode, global_mean = cf.calc_cat_encode(df, config, ["C1", "C2"])
+    cat_encode, global_mean = cf.calc_cat_encode(
+        df, ["C1", "C2"], cutoff=1, pseudo_count=1
+    )
 
     assert set(cat_encode.keys()) == {"C1", "C2"}
     assert global_mean == pytest.approx(3 / 5)
@@ -449,6 +450,23 @@ def test_get_data_target_encoding(patched_load_data):
     _check_shapes(datasets)
     train_X = datasets[0][0]
     assert all(train_X[col].dtype == pl.Float64 for col in cf.CAT_COLS)
+
+
+def test_get_data_target_encoding_requires_pseudo_count(patched_load_data):
+    config = {"sample_every": 1, "cat_cutoff": 1, "cat_order": "target"}
+    with pytest.raises(KeyError, match="cat_pseudo_count"):
+        cf.get_data(config, Path("some/dir"))
+
+
+@pytest.mark.parametrize("cat_order", ["tree", "node", "ohe", None])
+def test_get_data_enum_encoding_without_pseudo_count(patched_load_data, cat_order):
+    # cat_pseudo_count is only needed for target encoding
+    config = {"sample_every": 1, "cat_cutoff": 1, "cat_order": cat_order}
+    datasets = cf.get_data(config, Path("some/dir"))
+
+    _check_shapes(datasets)
+    train_X = datasets[0][0]
+    assert all(isinstance(train_X[col].dtype, pl.Enum) for col in cf.CAT_COLS)
 
 
 def test_get_data_enum_encoding(patched_load_data):
