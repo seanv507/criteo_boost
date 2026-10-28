@@ -2,10 +2,16 @@
 
 import functools
 import operator
+import os
 from pathlib import Path
 
 import polars as pl
+import xgboost as xgb
+import yaml
 from polars import selectors as cs
+from wandb.integration.xgboost import WandbCallback
+
+import wandb
 
 N_INTS = 13
 INTS = [f"I{i}" for i in range(1, N_INTS + 1)]
@@ -363,3 +369,80 @@ def parse_association(filename):
         .with_columns(rules=pl.col("items").map_elements(create_expression, pl.Object))
     )
     return df
+
+
+def train():
+    """wandb sweep agent entry point: trains an XGBClassifier for one sweep run."""
+    config = {
+        "sample_every": 1,
+        # max_cat_to_onehot":,
+        "n_estimators": 150,
+        "learning_rate": 0.1,
+        "gamma": 10,
+        "min_child_weight": 1,
+        "max_depth": 60,
+        "device": "gpu",
+        "tree_method": "hist",
+        "grow_policy": "lossguide",  # depthwise or lossguide
+        "early_stopping_rounds": 10,
+        "max_bin": 256,
+        "subsample": 1.0,
+    }
+
+    config["cat_order"] = "tree"
+    config["cat_cutoff"] = 100
+    config["reg_lambda"] = 10
+    config["cat_pseudo_count"] = 16  # equivalent to cat_reg_lambda
+
+    config["enable_categorical"] = config["cat_order"] in ["node", "tree", "ohe"]
+
+    if config["cat_order"] in ["node", "tree"]:
+        config["cat_reg_lambda"] = 400
+        config["max_cat_threshold"] = 1_000_000
+        config["max_cat_to_onehot"] = 10
+    elif config["cat_order"] == "target":
+        pass
+    elif config["cat_order"] == "ohe":
+        config["max_cat_threshold"] = 64
+        config["max_cat_to_onehot"] = 4_294_967_295
+
+    not_xgb_keys = ["sample_every", "cat_cutoff", "cat_pseudo_count"]
+    if config["cat_order"] not in ["node", "tree"]:
+        not_xgb_keys.append("cat_order")
+    with wandb.init(config=config) as _run:
+        config = wandb.config  # override with sweeps settings
+        config_xgb = {
+            key: value for key, value in config.items() if key not in not_xgb_keys
+        }
+        data_dir = get_data_dir()
+
+        (train_X, train_y), (valid_X, valid_y), (_test_X, _test_y) = get_data(
+            config, data_dir
+        )
+        clf = xgb.XGBClassifier(
+            **config_xgb, callbacks=[WandbCallback(log_feature_importance=True)]
+        )
+        clf.fit(
+            train_X,
+            train_y,
+            eval_set=[(train_X, train_y), (valid_X, valid_y)],
+            verbose=2,
+        )
+
+
+if __name__ == "__main__":
+    # All settings come from the environment:
+    #   WANDB_PROJECT      - W&B project name
+    #   WANDB_AGENT_RUNS   - number of runs this agent executes
+    #   WANDB_SWEEP_CONFIG - sweep configuration as a (multiline) YAML string
+    project = os.environ["WANDB_PROJECT"]
+    agent_count = int(os.environ["WANDB_AGENT_RUNS"])
+    sweep_configuration = yaml.safe_load(os.environ["WANDB_SWEEP_CONFIG"])
+    if not isinstance(sweep_configuration, dict):
+        raise ValueError("WANDB_SWEEP_CONFIG must be a YAML mapping")
+
+    # Initialize the sweep by passing in the config dictionary
+    sweep_id = wandb.sweep(sweep=sweep_configuration, project=project)
+
+    # Start the sweep job
+    wandb.agent(sweep_id, function=train, count=agent_count)

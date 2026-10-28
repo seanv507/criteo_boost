@@ -21,6 +21,7 @@ dependencies = [
     "xgboost>=3.3.0",
     "xlsxwriter>=3.2.9",
     "vl-convert-python>=1.9.0.post1",
+    "pyyaml>=6.0.3",
 ]
 
 [dependency-groups]
