@@ -90,6 +90,20 @@ original notebook (`~/projects/data/Criteo`, `/workspace/data/Criteo`, `../data/
 in direct `pl.scan_parquet`/`pl.read_parquet` calls — check which convention the
 surrounding cell uses rather than assuming one path.
 
+`train.parquet`/`valid.parquet`/`test.parquet` are mirrored at
+[huggingface.co/datasets/seanv507/Criteo](https://huggingface.co/datasets/seanv507/Criteo)
+(download with the `hf` CLI, e.g. `hf download seanv507/Criteo test.parquet valid.parquet
+train.parquet --repo-type dataset --local-dir <data_dir>`; see
+`.agents/skills/hf-cli/SKILL.md`). The repo is a single-commit upload under the user's
+own account with no dataset card, so it carries no provenance metadata of its own — but
+`valid.parquet`/`test.parquet` each have exactly 4,584,062 rows with an identical click
+count (1,174,544, CTR≈0.2562) and zero row overlap between them, matching the row counts
+of the well-known "Criteo_x4" 8:1:1 benchmark split (train 36,672,493 / valid 4,584,062 /
+test 4,584,062) used in CTR-prediction benchmark papers (FuxiCTR/BARS), not the raw
+Criteo Labs release — consistent with the `Criteo_x4_001*` directory names already
+present under the local data dir. Columns are `Label` (binary), `I1`-`I13` (integer,
+with nulls), `C1`-`C26` (hashed hex-string categoricals, with nulls).
+
 **Frequent itemsets / association rules**: mined outside Python using the `eclat` CLI
 (not part of this repo/environment by default). The notebook exports categorical
 columns as `Label:x`/`Ci:value` token lines (`*_items.tsv`) for `eclat` to consume, and

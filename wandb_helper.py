@@ -129,10 +129,7 @@ def make_runs_df(project_runs: dict[str, list[dict]]):
     run_dfs = []
     for project, runs in project_runs.items():
         run_df = (
-            pl.DataFrame(
-                runs,
-                strict=False,
-            )
+            pl.DataFrame(runs, strict=False, infer_schema_length=1000)
             # schema_overrides={"feature_importance": pl.List(pl.Struct({"feature": pl.String, "importance": pl.Float64}))}
         ).insert_column(0, pl.lit(project).alias("project"))
         run_dfs.append(run_df)

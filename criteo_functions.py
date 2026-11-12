@@ -489,7 +489,7 @@ def stop_self():
     print(f"Attempting to stop pod: {pod_id}...")
 
     # RunPod REST API Endpoint to stop a pod
-    url = f"https://rest.runpod.io/v1/pods/{pod_id}/stop"
+    url = f"https://rest.runpod.io/v2/pods/{pod_id}/stop"
     headers = {"Authorization": f"Bearer {api_key}"}
 
     try:
