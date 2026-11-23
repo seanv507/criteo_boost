@@ -18,7 +18,7 @@ There is some evidence that overfitting occurs at lower values of `cat_cutoff` (
 
 The very bad validation log loss (above 0.466) of Node level categorical encoding is with `reg_lambda` = 0.  We found that introducing `reg_lambda` was essential to drop the error for this encoding. Note that `cat_cutoff` acts as a regularising influence in this case (ie reducing the number of categories improves validation error, presumably by reducing overfitting).  The improved performance of node encoding (around 0.45) was achieved with high `reg_lambda` of _25,000_ or more. Given that in most of our experiments a value of  `reg_lambda=0` was better, it suggests the need for different `reg_lambda` for different values
 
-## `Cat_cutoff ` from 100 to 1000 - (Tree 1st 0.4420 Node 2nd 0.4485 OHE 3rd 0.4509 at `cat_cutoff=100`)
+## `Cat_cutoff ` from 100 to 1000 - (Tree 1st 0.4420 OHE 2nd 0.4453 Node 3rd 0.4485  at `cat_cutoff=100`)
 
 Over this range, we were able to build trees with all these models. As can be seen tree level encoding was best followed by node, followed by one hot encoding. Target encoding has few results plotted, because most of our target encoding experiments were performed with downsampled data.
 

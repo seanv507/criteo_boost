@@ -157,9 +157,8 @@ def calc_cat_encode(df, cat_cols, cutoff, pseudo_count):
             cutoff=cutoff,
             pseudo_count=pseudo_count,
         )
-        cat_encode[col] = pl.concat(
-            (cat_ctrs.collect(), rest_ctr.collect()), how="diagonal"
-        )
+        cat_ctrs, rest_ctr = pl.collect_all([cat_ctrs, rest_ctr])
+        cat_encode[col] = pl.concat((cat_ctrs, rest_ctr), how="diagonal")
     return cat_encode, gm
 
 
