@@ -4,6 +4,11 @@ Target Encoding - encode the category using a Laplace smoothed mean target value
 Node level Encoding - reencode categories _at each node_ using a Laplace smoothed mean objective value using parameter `cat_reg_lambda`
 Tree level Encoding - reencode categories _only at each tree root_ using a Laplace smoothed mean objective value using parameter `cat_reg_lambda`
 
+
+## Dataset Description
+The dataset used is the criteo display ads dataset.  The particular version used is the same as [Deep and Cross v3](https://arxiv.org/html/2407.13349v1)
+They use a rare categories cutoff of 10.  Most of our experiments so far have used a cutoff of 100, and we report the valuidation error (so far), not the test set.  They report that Fm FM achieve a testset error of 0.4399, whilst DCNv3 achieves 0.4364.  Extrapolating from our graphs, we might expect no lower than 0.4415.
+
 # Rare categories cutoff (and memory issues)
 
 The comparison is complicated by the different memory requirements of the different methods.

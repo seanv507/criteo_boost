@@ -117,6 +117,43 @@ XGBoost booster, the summed gradient/hessian (`G`/`H`) bottom-up from
 essentially a from-scratch reimplementation of XGBoost's internal gain calculation, used
 to sanity-check/explore it rather than for training.
 
+**Tree statistics for hyperparameter tuning** (`tree_stats.py`: `tree_node_stats`, used
+in `tree_metrics_analysis.ipynb`, a work in progress). The goal is to choose `gamma`,
+`min_child_weight`, `max_depth` and so on from per-node statistics of a fitted model
+instead of by trial and error. `tree_stats.py` came from a Claude session in
+`~/projects/xgboost` (the user's XGBoost fork). It is pandas, not polars, and has no
+tests yet. What that session established:
+
+- **Why `trees_to_dataframe()` is slow here.** With `max_depth=60` (the `train()`
+  default), depth no longer limits the trees, so the node count grows with the number of
+  training rows. A synthetic 1M-row test gave about 650k nodes per tree; 150 trees would
+  be about 100M nodes. `trees_to_dataframe()` builds Python objects per node, about
+  2–4 µs and about 900 B each, so roughly 90 GB at peak, which swaps. That explains the
+  30+ minute runs. `get_tree_statistics` builds on `trees_to_dataframe()` and loops in
+  Python per tree, so it shares the problem: only use it on small models. A saved `.ubj`
+  model is about 35 B per node, so the file size gives the node count up front.
+- **What `tree_node_stats` does differently.** It slices the booster
+  (`booster[a:b]`, `rounds_per_chunk` rounds at a time) and reads the raw JSON node
+  arrays with numpy. It computes depth breadth-first for all trees at once and uses
+  compact dtypes (about 30 B per node). Columns: `tree, node, depth, is_leaf, feature`
+  (an index, not a name), `split, gain, cover, leaf_value`. On the depth-60 test it ran
+  in 2.7 s against 8.6 s for `trees_to_dataframe`, with identical results. If even that
+  is too much memory, reduce each chunk to per-depth summaries instead of keeping rows.
+- **Categorical splits (checked in this repo, xgboost 3.3.0).** `gain`, `cover` and
+  `leaf_value` match `trees_to_dataframe()`. On categorical split nodes, though,
+  `split` holds junk (about `1e-45`) and the category set isn't extracted, so filter
+  those nodes out before using `split`.
+- **Reading the numbers.** The stored gain (`loss_changes`) has no ½ factor and no
+  −γ term, unlike the textbook formula in the notebook's markdown cell. XGBoost prunes a
+  split when `loss_chg < min_split_loss`, so `gain` is on the same scale as `gamma`
+  directly. (`get_tree_statistics`' `Gain_Expected` follows the same convention.)
+  `cover` is the hessian sum, so compare it with `min_child_weight`.
+- **Survivorship bias.** Pruned splits are not stored, so only collect statistics from
+  a permissive baseline (`gamma=0`, a small `min_child_weight`, a generous
+  `max_depth`). Gains of candidate splits that were evaluated but rejected, or stopped
+  by `max_depth`/`max_leaves`, would need C++ instrumentation in
+  `src/tree/hist/evaluate_splits.h` in the fork.
+
 **Experiment tracking**: Weights & Biases, entity `seanv507`. Hyperparameter sweeps are
 run via `wandb.sweep(...)` + `wandb.agent(sweep_id, train)`, either interactively in
 `criteo_train.ipynb` or headless via `python criteo_functions.py` (see Commands).

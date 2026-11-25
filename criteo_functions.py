@@ -417,20 +417,20 @@ def train():
     config = {
         "sample_every": 1,
         # max_cat_to_onehot":,
-        "n_estimators": 150,
+        "n_estimators": 1000,
         "learning_rate": 0.1,
         "gamma": 10,
         "min_child_weight": 1,
-        "max_depth": 60,
+        "max_depth": 10,
         "device": "gpu",
         "tree_method": "hist",
         "early_stopping_rounds": 10,
-        "max_bin": 256,
+        "max_bin": 128,
         "subsample": 1.0,
     }
 
     config["cat_order"] = "tree"
-    config["cat_cutoff"] = 100
+    config["cat_cutoff"] = 10
     config["reg_lambda"] = 10
 
     config["inputs"] = "all"  # see select_inputs, e.g. "ints", "cats", "ints,C1"
@@ -438,7 +438,7 @@ def train():
     config["enable_categorical"] = config["cat_order"] in ["node", "tree", "ohe"]
 
     if config["cat_order"] in ["node", "tree"]:
-        config["cat_reg_lambda"] = 400
+        config["cat_reg_lambda"] = 100
         config["max_cat_threshold"] = 1_000_000
         config["max_cat_to_onehot"] = 10
     elif config["cat_order"] == "target":
@@ -472,6 +472,7 @@ def train():
             eval_set=[(train_X, train_y), (valid_X, valid_y)],
             verbose=2,
         )
+        notify("finished sweep run")
 
 
 def stop_self():
@@ -488,16 +489,19 @@ def stop_self():
     print(f"Attempting to stop pod: {pod_id}...")
 
     # RunPod REST API Endpoint to stop a pod
-    url = f"https://rest.runpod.io/v2/pods/{pod_id}/stop"
+    import requests
+
+    url = f"https://api.runpod.io/v2/pods/{pod_id}/action"
+    payload = {"action": "stop"}
     headers = {"Authorization": f"Bearer {api_key}"}
 
     try:
-        response = requests.post(url, headers=headers)
+        response = requests.post(url, json=payload, headers=headers)
         if response.status_code == 200:
             print("Successfully requested pod shutdown!")
         else:
             print(
-                f"Failed to stop pod. Status code: {response.status_code}, Response: {response.text}"
+                f"Failed to stop pod at {url}. Status code: {response.status_code}, Response: {response.text}"
             )
     except requests.RequestException as e:
         print(f"An error occurred: {e}")
