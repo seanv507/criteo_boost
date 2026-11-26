@@ -52,6 +52,9 @@ def _chunk(booster, tree_offset: int) -> pd.DataFrame:
             "node": (np.arange(len(left)) - offsets[local_tree]).astype(np.int32)[keep],
             "depth": depth[keep],
             "is_leaf": is_leaf[keep],
+            # child node ids within the same tree (trees_to_dataframe's Yes/No), -1 on leaves
+            "left": left.astype(np.int32)[keep],
+            "right": right.astype(np.int32)[keep],
             "feature": np.where(is_leaf, -1, feat)[keep],
             "split": np.where(is_leaf, nan, sconds)[keep],
             "gain": np.where(is_leaf, nan, gain)[keep],  # loss_chg, compare to gamma
@@ -64,8 +67,8 @@ def _chunk(booster, tree_offset: int) -> pd.DataFrame:
 def tree_node_stats(booster, rounds_per_chunk: int = 5) -> pd.DataFrame:
     """One row per reachable node of every tree in ``booster``.
 
-    Columns: tree, node, depth, is_leaf, feature (index), split, gain, cover,
-    leaf_value. Lower ``rounds_per_chunk`` if a single chunk doesn't fit in memory.
+    Columns: tree, node, depth, is_leaf, left, right, feature (index), split, gain,
+    cover, leaf_value. Lower ``rounds_per_chunk`` if a single chunk doesn't fit in memory.
     """
     parts, tree_offset = [], 0
     n_rounds = booster.num_boosted_rounds()

@@ -115,14 +115,24 @@ expressions per itemset/rule using `create_expression`.
 XGBoost booster, the summed gradient/hessian (`G`/`H`) bottom-up from
 `trees_to_dataframe()`, then derives an independent `Metric`/`Gain_Expected` per node —
 essentially a from-scratch reimplementation of XGBoost's internal gain calculation, used
-to sanity-check/explore it rather than for training.
+to sanity-check/explore it rather than for training. It goes through
+`trees_to_dataframe()` and a per-tree Python loop, so it's only practical on small models.
+`get_tree_statistics_fast(model_or_booster, rounds_per_chunk=5)` computes the same
+`H/G/Metric/Metric_Yes/Metric_No/Gain_Expected` from `tree_stats.tree_node_stats` output
+via `add_gradient_statistics(stats, lam, eta)`: numpy, bottom-up one depth level at a
+time. It's about 6× faster on a 500k-node model and scales to depth-60 models. Its
+columns use `tree_node_stats` names (`tree`, `node`, `left`, `right`, `cover`, …), not
+`trees_to_dataframe`'s (`Tree`, `Node`, `Yes`, `No`, `Cover`, …). Values agree with
+`get_tree_statistics` to about 1e-3 relative at worst: the fast path reads float32 node
+arrays, and summing many leaves amplifies tiny differences where `G` is near 0.
 
 **Tree statistics for hyperparameter tuning** (`tree_stats.py`: `tree_node_stats`, used
 in `tree_metrics_analysis.ipynb`, a work in progress). The goal is to choose `gamma`,
 `min_child_weight`, `max_depth` and so on from per-node statistics of a fitted model
 instead of by trial and error. `tree_stats.py` came from a Claude session in
-`~/projects/xgboost` (the user's XGBoost fork). It is pandas, not polars, and has no
-tests yet. What that session established:
+`~/projects/xgboost` (the user's XGBoost fork). It is pandas, not polars. It's
+tested indirectly by `tests/test_tree_analysis.py`, which checks
+`get_tree_statistics_fast` against `get_tree_statistics`. What that session established:
 
 - **Why `trees_to_dataframe()` is slow here.** With `max_depth=60` (the `train()`
   default), depth no longer limits the trees, so the node count grows with the number of
