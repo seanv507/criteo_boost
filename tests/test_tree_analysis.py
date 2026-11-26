@@ -76,21 +76,23 @@ def deep_regularised_classifier():
 
 
 def _compare_with_slow(model, rounds_per_chunk):
-    slow = ta.get_tree_statistics(model).select(
-        pl.col("Tree").alias("tree"), pl.col("Node").alias("node"), *STAT_COLS
+    # the polars reference's nulls become NaN in pandas, matching the fast path
+    slow = (
+        ta.get_tree_statistics(model)
+        .select(pl.col("Tree").alias("tree"), pl.col("Node").alias("node"), *STAT_COLS)
+        .to_pandas()
     )
     fast = ta.get_tree_statistics_fast(model, rounds_per_chunk=rounds_per_chunk)
-    assert fast.height == slow.height
-    joined = fast.select("tree", "node", *STAT_COLS).join(
-        slow, on=["tree", "node"], suffix="_slow", validate="1:1"
+    assert isinstance(fast, pd.DataFrame)
+    assert len(fast) == len(slow)
+    joined = fast[["tree", "node", *STAT_COLS]].merge(
+        slow, on=["tree", "node"], suffixes=("", "_slow"), validate="1:1"
     )
-    assert joined.height == slow.height
+    assert len(joined) == len(slow)
     for col in STAT_COLS:
-        # nulls (leaves' Metric_Yes/No/Gain_Expected) must line up too
-        assert (
-            joined[col].is_null().to_list() == joined[f"{col}_slow"].is_null().to_list()
-        )
-        both = joined.drop_nulls([col, f"{col}_slow"])
+        # NaNs (leaves' Metric_Yes/No/Gain_Expected) must line up too
+        assert (joined[col].isna() == joined[f"{col}_slow"].isna()).all()
+        both = joined.dropna(subset=[col, f"{col}_slow"])
         # fast reads float32 node arrays, slow goes via trees_to_dataframe's floats
         np.testing.assert_allclose(
             both[col].to_numpy(), both[f"{col}_slow"].to_numpy(), rtol=1e-4, atol=1e-3
@@ -144,7 +146,73 @@ def test_add_gradient_statistics_hand_built_tree():
     assert out["Metric"].to_list() == pytest.approx(metric)
     assert out["Gain_Expected"][0] == pytest.approx(metric[1] + metric[2] - metric[0])
     assert out["Gain_Expected"][1] == pytest.approx(metric[3] + metric[4] - metric[1])
-    assert out["Gain_Expected"][2:].is_null().all()
+    assert out["Gain_Expected"][2:].isna().all()
+    assert out["Metric_Yes"].tolist()[:2] == pytest.approx([metric[1], metric[3]])
+    assert out["Metric_No"].tolist()[:2] == pytest.approx([metric[2], metric[4]])
+    # input columns pass through unchanged, the input frame isn't modified
+    pd.testing.assert_frame_equal(out[stats.columns], stats)
+    assert "G" not in stats.columns
+
+
+# ---------------------------------------------------------------------------
+# tree_node_stats
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("rounds_per_chunk", [1, 2, 100])
+def test_tree_node_stats_matches_trees_to_dataframe(
+    deep_regularised_classifier, rounds_per_chunk
+):
+    booster = deep_regularised_classifier.get_booster()
+    stats = ta.tree_node_stats(booster, rounds_per_chunk=rounds_per_chunk)
+    ref = booster.trees_to_dataframe()
+
+    assert isinstance(stats, pd.DataFrame)
+    assert list(stats.columns) == [
+        "tree",
+        "node",
+        "depth",
+        "is_leaf",
+        "left",
+        "right",
+        "feature",
+        "split",
+        "gain",
+        "cover",
+        "leaf_value",
+    ]
+    stats = stats.sort_values(["tree", "node"]).reset_index(drop=True)
+    ref = ref.sort_values(["Tree", "Node"]).reset_index(drop=True)
+    assert len(stats) == len(ref)
+    assert (stats["tree"].to_numpy() == ref["Tree"].to_numpy()).all()
+    assert (stats["node"].to_numpy() == ref["Node"].to_numpy()).all()
+
+    leaf = (ref["Feature"] == "Leaf").to_numpy()
+    assert (stats["is_leaf"].to_numpy() == leaf).all()
+    np.testing.assert_allclose(stats["cover"], ref["Cover"], rtol=1e-6)
+    np.testing.assert_allclose(stats["gain"][~leaf], ref["Gain"][~leaf], rtol=1e-6)
+    np.testing.assert_allclose(stats["leaf_value"][leaf], ref["Gain"][leaf], rtol=1e-6)
+    np.testing.assert_allclose(stats["split"][~leaf], ref["Split"][~leaf], rtol=1e-6)
+    assert stats.loc[leaf, ["gain", "split"]].isna().all().all()
+    assert stats.loc[~leaf, "leaf_value"].isna().all()
+
+    # children: trees_to_dataframe's Yes/No are "tree-node" ids
+    child = lambda col: ref[col][~leaf].str.split("-").str[1].astype(int).to_numpy()
+    assert (stats["left"][~leaf].to_numpy() == child("Yes")).all()
+    assert (stats["right"][~leaf].to_numpy() == child("No")).all()
+    assert (stats.loc[leaf, ["left", "right"]] == -1).all().all()
+
+
+def test_tree_node_stats_depth_and_tree_numbering(deep_regularised_classifier):
+    stats = ta.tree_node_stats(deep_regularised_classifier.get_booster(), 3)
+    n_trees = deep_regularised_classifier.get_booster().num_boosted_rounds()
+    assert sorted(stats["tree"].unique()) == list(range(n_trees))
+    assert (stats.loc[stats["node"] == 0, "depth"] == 0).all()
+    depth = stats.set_index(["tree", "node"])["depth"]
+    internal = stats[~stats["is_leaf"]]
+    for col in ("left", "right"):
+        child_depth = depth.loc[list(zip(internal["tree"], internal[col]))].to_numpy()
+        assert (child_depth == internal["depth"].to_numpy() + 1).all()
 
 
 # ---------------------------------------------------------------------------

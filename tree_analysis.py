@@ -1,3 +1,16 @@
+"""Per-node statistics for fitted XGBoost tree models.
+
+The first section (`tree_node_stats`, `add_gradient_statistics`,
+`get_tree_statistics_fast`) uses only numpy, pandas and the standard library and
+returns pandas DataFrames. It is vectorised and processes the model a few boosting
+rounds at a time (``booster[a:b]``), so peak memory is bounded by one chunk of trees
+rather than by the whole model, and it scales to large (e.g. depth-60) models.
+
+The second section (`get_tree_statistics`, `add_level`) is the original polars
+implementation on top of `booster.trees_to_dataframe()`. It is only practical on
+small models, and is kept as the reference the fast path is tested against.
+"""
+
 import json
 
 import numpy as np
@@ -5,7 +18,80 @@ import pandas as pd
 import polars as pl
 import xgboost as xgb
 
-from tree_stats import tree_node_stats
+# ---------------------------------------------------------------------------
+# Fast path: numpy + pandas, chunked over boosting rounds
+# ---------------------------------------------------------------------------
+
+
+def _chunk(booster, tree_offset: int) -> pd.DataFrame:
+    model = json.loads(booster.save_raw(raw_format="json"))
+    trees = model["learner"]["gradient_booster"]["model"]["trees"]
+    del model
+    sizes = np.array([len(t["left_children"]) for t in trees])
+    offsets = np.concatenate([[0], np.cumsum(sizes)[:-1]])
+
+    def cat(key, dtype):
+        return np.concatenate([np.asarray(t[key], dtype=dtype) for t in trees])  # noqa: F821
+
+    left = cat("left_children", np.int64)
+    right = cat("right_children", np.int64)
+    feat = cat("split_indices", np.int32)
+    sconds = cat("split_conditions", np.float32)
+    gain = cat("loss_changes", np.float32)
+    cover = cat("sum_hessian", np.float32)
+    del trees
+
+    local_tree = np.repeat(np.arange(len(sizes)), sizes)
+    is_leaf = left == -1
+    gl = np.where(is_leaf, -1, left + offsets[local_tree])
+    gr = np.where(is_leaf, -1, right + offsets[local_tree])
+
+    # Breadth-first from every root at once; one numpy step per depth level.
+    # Unreachable (pruned/deleted) nodes keep depth -1 and are dropped.
+    depth = np.full(len(left), -1, dtype=np.int16)
+    frontier, d = offsets.copy(), 0
+    while frontier.size:
+        depth[frontier] = d
+        frontier = frontier[~is_leaf[frontier]]
+        frontier = np.concatenate([gl[frontier], gr[frontier]])
+        d += 1
+
+    keep = depth >= 0
+    nan = np.float32(np.nan)
+    return pd.DataFrame(
+        {
+            "tree": (local_tree + tree_offset).astype(np.int32)[keep],
+            "node": (np.arange(len(left)) - offsets[local_tree]).astype(np.int32)[keep],
+            "depth": depth[keep],
+            "is_leaf": is_leaf[keep],
+            # child node ids within the same tree (trees_to_dataframe's Yes/No), -1 on leaves
+            "left": left.astype(np.int32)[keep],
+            "right": right.astype(np.int32)[keep],
+            "feature": np.where(is_leaf, -1, feat)[keep],
+            "split": np.where(is_leaf, nan, sconds)[keep],
+            "gain": np.where(is_leaf, nan, gain)[keep],  # loss_chg, compare to gamma
+            "cover": cover[keep],  # sum of hessian, compare to min_child_weight
+            "leaf_value": np.where(is_leaf, sconds, nan)[keep],
+        }
+    )
+
+
+def tree_node_stats(booster, rounds_per_chunk: int = 5) -> pd.DataFrame:
+    """One row per reachable node of every tree in ``booster``.
+
+    Columns: tree, node, depth, is_leaf, left, right, feature (index), split, gain,
+    cover, leaf_value. Uses compact dtypes (~38 bytes per node). Lower
+    ``rounds_per_chunk`` if a single chunk doesn't fit in memory.
+    """
+    parts, tree_offset = [], 0
+    n_rounds = booster.num_boosted_rounds()
+    for start in range(0, n_rounds, rounds_per_chunk):
+        part = _chunk(
+            booster[start : min(start + rounds_per_chunk, n_rounds)], tree_offset
+        )
+        tree_offset = int(part["tree"].max()) + 1
+        parts.append(part)
+    return pd.concat(parts, ignore_index=True)
 
 
 def _lambda_eta(booster):
@@ -15,7 +101,9 @@ def _lambda_eta(booster):
     return float(params["lambda"]), float(params["eta"])
 
 
-def add_gradient_statistics(stats: pd.DataFrame, lam: float, eta: float):
+def add_gradient_statistics(
+    stats: pd.DataFrame, lam: float, eta: float
+) -> pd.DataFrame:
     """Add get_tree_statistics' G/H/Metric/Gain_Expected columns to tree_node_stats output.
 
     Vectorised equivalent of the per-tree loop in `get_tree_statistics`: leaf `G` is
@@ -23,15 +111,15 @@ def add_gradient_statistics(stats: pd.DataFrame, lam: float, eta: float):
     nodes are filled bottom-up one depth level at a time as `G[left] + G[right]`.
 
     Args:
-        stats: output of `tree_stats.tree_node_stats` (needs tree, node, depth,
-            is_leaf, left, right, cover, leaf_value).
+        stats: output of `tree_node_stats` (needs tree, node, depth, is_leaf, left,
+            right, cover, leaf_value).
         lam: the model's `lambda` (reg_lambda).
         eta: the model's learning rate.
 
     Returns:
-        polars DataFrame of `stats` plus `H`, `G`, `Metric` (= G^2 / (H + lam)),
+        pandas DataFrame of `stats` plus `H`, `G`, `Metric` (= G^2 / (H + lam)),
         `Metric_Yes`, `Metric_No` (the children's Metric) and `Gain_Expected`
-        (= Metric_Yes + Metric_No - Metric). The last three are null on leaves.
+        (= Metric_Yes + Metric_No - Metric). The last three are NaN on leaves.
     """
     tree = stats["tree"].to_numpy()
     node = stats["node"].to_numpy().astype(np.int64)
@@ -65,19 +153,17 @@ def add_gradient_statistics(stats: pd.DataFrame, lam: float, eta: float):
     metric = G**2 / (H + lam)
     metric_yes = np.where(internal, metric[left_row], np.nan)
     metric_no = np.where(internal, metric[right_row], np.nan)
-    return pl.from_pandas(
-        stats.assign(
-            H=H,
-            G=G,
-            Metric=metric,
-            Metric_Yes=metric_yes,
-            Metric_No=metric_no,
-            Gain_Expected=metric_yes + metric_no - metric,
-        )
+    return stats.assign(
+        H=H,
+        G=G,
+        Metric=metric,
+        Metric_Yes=metric_yes,
+        Metric_No=metric_no,
+        Gain_Expected=metric_yes + metric_no - metric,
     )
 
 
-def get_tree_statistics_fast(model, rounds_per_chunk: int = 5):
+def get_tree_statistics_fast(model, rounds_per_chunk: int = 5) -> pd.DataFrame:
     """`get_tree_statistics` built on `tree_node_stats` instead of `trees_to_dataframe`.
 
     Same G/H/Metric/Gain_Expected values, but scales to large (e.g. depth-60) models.
@@ -87,10 +173,18 @@ def get_tree_statistics_fast(model, rounds_per_chunk: int = 5):
     Args:
         model: a fitted XGBoost sklearn model, or a `xgb.Booster`.
         rounds_per_chunk: passed to `tree_node_stats`; lower it if memory is tight.
+
+    Returns:
+        pandas DataFrame, see `add_gradient_statistics`.
     """
     booster = model.get_booster() if hasattr(model, "get_booster") else model
     lam, eta = _lambda_eta(booster)
     return add_gradient_statistics(tree_node_stats(booster, rounds_per_chunk), lam, eta)
+
+
+# ---------------------------------------------------------------------------
+# Reference implementation: polars on top of trees_to_dataframe (small models only)
+# ---------------------------------------------------------------------------
 
 
 def get_tree_statistics(model: xgb.XGBModel):

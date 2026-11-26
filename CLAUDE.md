@@ -111,28 +111,38 @@ columns as `Label:x`/`Ci:value` token lines (`*_items.tsv`) for `eclat` to consu
 `parse_frequent`/`parse_association`, which build a `rules` column of polars filter
 expressions per itemset/rule using `create_expression`.
 
-**Tree analysis** (`tree_analysis.py`: `get_tree_statistics`, `add_level`): reconstructs, per split node of a fitted
-XGBoost booster, the summed gradient/hessian (`G`/`H`) bottom-up from
-`trees_to_dataframe()`, then derives an independent `Metric`/`Gain_Expected` per node —
-essentially a from-scratch reimplementation of XGBoost's internal gain calculation, used
-to sanity-check/explore it rather than for training. It goes through
-`trees_to_dataframe()` and a per-tree Python loop, so it's only practical on small models.
-`get_tree_statistics_fast(model_or_booster, rounds_per_chunk=5)` computes the same
-`H/G/Metric/Metric_Yes/Metric_No/Gain_Expected` from `tree_stats.tree_node_stats` output
-via `add_gradient_statistics(stats, lam, eta)`: numpy, bottom-up one depth level at a
-time. It's about 6× faster on a 500k-node model and scales to depth-60 models. Its
-columns use `tree_node_stats` names (`tree`, `node`, `left`, `right`, `cover`, …), not
-`trees_to_dataframe`'s (`Tree`, `Node`, `Yes`, `No`, `Cover`, …). Values agree with
-`get_tree_statistics` to about 1e-3 relative at worst: the fast path reads float32 node
-arrays, and summing many leaves amplifies tiny differences where `G` is near 0.
+**Tree analysis** (`tree_analysis.py`) reconstructs, per node of a fitted XGBoost
+booster, the summed gradient/hessian (`G`/`H`) bottom-up, then derives an independent
+`Metric`/`Gain_Expected` per node. It's essentially a from-scratch reimplementation of
+XGBoost's internal gain calculation, used to sanity-check/explore it rather than for
+training. The file has two sections:
 
-**Tree statistics for hyperparameter tuning** (`tree_stats.py`: `tree_node_stats`, used
-in `tree_metrics_analysis.ipynb`, a work in progress). The goal is to choose `gamma`,
+- **Fast path: numpy + pandas only, returns pandas.**
+  - `tree_node_stats(booster, rounds_per_chunk=5)` gives one row per node.
+  - `add_gradient_statistics(stats, lam, eta)` adds
+    `H/G/Metric/Metric_Yes/Metric_No/Gain_Expected` vectorised, bottom-up one depth level
+    at a time. `Metric_*` and `Gain_Expected` are NaN on leaves.
+  - `get_tree_statistics_fast(model_or_booster, rounds_per_chunk=5)` wraps the two.
+
+  This section deliberately avoids polars, despite the repo-wide polars preference: the
+  user may submit it as a PR to upstream XGBoost, which uses pandas. Keep it free of
+  polars and of this repo's other modules. It's about 6× faster than the reference on a
+  500k-node model and scales to depth-60 models. Its columns use `tree_node_stats` names
+  (`tree`, `node`, `left`, `right`, `cover`, …), not `trees_to_dataframe`'s (`Tree`,
+  `Node`, `Yes`, `No`, `Cover`, …). Values agree with the reference to about 1e-3
+  relative at worst: it reads float32 node arrays, and summing many leaves amplifies
+  tiny differences where `G` is near 0.
+- **Reference: polars, `get_tree_statistics(model)` and `add_level(df)`.** These go
+  through `trees_to_dataframe()` and a per-tree Python loop, so they're only practical
+  on small models. They return polars, use `trees_to_dataframe` column names, and are
+  what the tests check the fast path against.
+
+**Tree statistics for hyperparameter tuning** (`tree_analysis.tree_node_stats`, used in
+`tree_metrics_analysis.ipynb`, a work in progress). The goal is to choose `gamma`,
 `min_child_weight`, `max_depth` and so on from per-node statistics of a fitted model
-instead of by trial and error. `tree_stats.py` came from a Claude session in
-`~/projects/xgboost` (the user's XGBoost fork). It is pandas, not polars. It's
-tested indirectly by `tests/test_tree_analysis.py`, which checks
-`get_tree_statistics_fast` against `get_tree_statistics`. What that session established:
+instead of by trial and error. `tree_node_stats` came from a Claude session in
+`~/projects/xgboost` (the user's XGBoost fork) as a separate `tree_stats.py`, later
+merged into `tree_analysis.py`. What that session established:
 
 - **Why `trees_to_dataframe()` is slow here.** With `max_depth=60` (the `train()`
   default), depth no longer limits the trees, so the node count grows with the number of
@@ -145,8 +155,9 @@ tested indirectly by `tests/test_tree_analysis.py`, which checks
 - **What `tree_node_stats` does differently.** It slices the booster
   (`booster[a:b]`, `rounds_per_chunk` rounds at a time) and reads the raw JSON node
   arrays with numpy. It computes depth breadth-first for all trees at once and uses
-  compact dtypes (about 30 B per node). Columns: `tree, node, depth, is_leaf, feature`
-  (an index, not a name), `split, gain, cover, leaf_value`. On the depth-60 test it ran
+  compact dtypes (about 38 B per node). Columns: `tree, node, depth, is_leaf, left,
+  right` (child node ids within the tree, −1 on leaves), `feature` (an index, not a
+  name), `split, gain, cover, leaf_value`. On the depth-60 test it ran
   in 2.7 s against 8.6 s for `trees_to_dataframe`, with identical results. If even that
   is too much memory, reduce each chunk to per-depth summaries instead of keeping rows.
 - **Categorical splits (checked in this repo, xgboost 3.3.0).** `gain`, `cover` and
