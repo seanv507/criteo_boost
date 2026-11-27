@@ -175,6 +175,7 @@ def test_tree_node_stats_matches_trees_to_dataframe(
         "is_leaf",
         "left",
         "right",
+        "missing",
         "feature",
         "split",
         "gain",
@@ -200,7 +201,33 @@ def test_tree_node_stats_matches_trees_to_dataframe(
     child = lambda col: ref[col][~leaf].str.split("-").str[1].astype(int).to_numpy()
     assert (stats["left"][~leaf].to_numpy() == child("Yes")).all()
     assert (stats["right"][~leaf].to_numpy() == child("No")).all()
-    assert (stats.loc[leaf, ["left", "right"]] == -1).all().all()
+    assert (stats["missing"][~leaf].to_numpy() == child("Missing")).all()
+    assert (stats.loc[leaf, ["left", "right", "missing"]] == -1).all().all()
+
+
+def test_tree_node_stats_missing_follows_default_direction():
+    # NaNs in the training data make XGBoost learn a default direction per split
+    rng = np.random.default_rng(2)
+    X = rng.normal(size=(3000, 4))
+    y = (X[:, 0] + X[:, 1] > 0).astype(int)
+    X[rng.random(X.shape) < 0.3] = np.nan
+    X[np.isnan(X[:, 0]) & (y == 1), 1] = np.nan  # make missingness informative
+    clf = xgb.XGBClassifier(n_estimators=5, max_depth=4, tree_method="hist")
+    clf.fit(X, y)
+    booster = clf.get_booster()
+
+    stats = ta.tree_node_stats(booster, rounds_per_chunk=2)
+    stats = stats.sort_values(["tree", "node"]).reset_index(drop=True)
+    ref = booster.trees_to_dataframe().sort_values(["Tree", "Node"])
+    internal = (ref["Feature"] != "Leaf").to_numpy()
+    expected = ref["Missing"][internal].str.split("-").str[1].astype(int).to_numpy()
+
+    split_rows = stats[~stats["is_leaf"]]
+    assert (split_rows["missing"].to_numpy() == expected).all()
+    goes_left = split_rows["missing"] == split_rows["left"]
+    goes_right = split_rows["missing"] == split_rows["right"]
+    assert (goes_left | goes_right).all()
+    assert goes_left.any() and goes_right.any()  # both directions are exercised
 
 
 def test_tree_node_stats_depth_and_tree_numbering(deep_regularised_classifier):

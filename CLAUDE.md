@@ -155,9 +155,10 @@ merged into `tree_analysis.py`. What that session established:
 - **What `tree_node_stats` does differently.** It slices the booster
   (`booster[a:b]`, `rounds_per_chunk` rounds at a time) and reads the raw JSON node
   arrays with numpy. It computes depth breadth-first for all trees at once and uses
-  compact dtypes (about 38 B per node). Columns: `tree, node, depth, is_leaf, left,
-  right` (child node ids within the tree, −1 on leaves), `feature` (an index, not a
-  name), `split, gain, cover, leaf_value`. On the depth-60 test it ran
+  compact dtypes (about 42 B per node). Columns: `tree, node, depth, is_leaf, left,
+  right, missing` (child node ids within the tree, −1 on leaves; `missing` is the
+  default-direction child, from the JSON `default_left` flag), `feature` (an index, not
+  a name), `split, gain, cover, leaf_value`. On the depth-60 test it ran
   in 2.7 s against 8.6 s for `trees_to_dataframe`, with identical results. If even that
   is too much memory, reduce each chunk to per-depth summaries instead of keeping rows.
 - **Categorical splits (checked in this repo, xgboost 3.3.0).** `gain`, `cover` and
