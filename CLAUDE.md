@@ -121,7 +121,8 @@ training. The file has two sections:
   - `tree_node_stats(booster, rounds_per_chunk=5)` gives one row per node.
   - `add_gradient_statistics(stats, lam, eta)` adds
     `H/G/Metric/Metric_Yes/Metric_No/Gain_Expected` vectorised, bottom-up one depth level
-    at a time. `Metric_*` and `Gain_Expected` are NaN on leaves.
+    at a time. `Metric_*` and `Gain_Expected` are NaN on leaves; `Metric_Yes` is
+    the `right` child on categorical splits (see below).
   - `get_tree_statistics_fast(model_or_booster, rounds_per_chunk=5)` wraps the two.
 
   This section deliberately avoids polars, despite the repo-wide polars preference: the
@@ -155,16 +156,25 @@ merged into `tree_analysis.py`. What that session established:
 - **What `tree_node_stats` does differently.** It slices the booster
   (`booster[a:b]`, `rounds_per_chunk` rounds at a time) and reads the raw JSON node
   arrays with numpy. It computes depth breadth-first for all trees at once and uses
-  compact dtypes (about 42 B per node). Columns: `tree, node, depth, is_leaf, left,
-  right, missing` (child node ids within the tree, −1 on leaves; `missing` is the
-  default-direction child, from the JSON `default_left` flag), `feature` (an index, not
-  a name), `split, gain, cover, leaf_value`. On the depth-60 test it ran
+  compact dtypes (about 51 B per node, plus arrays on categorical nodes). Columns:
+  `tree, node, depth, is_leaf, left, right, missing` (child node ids within the tree,
+  −1 on leaves; `missing` is the default-direction child, from the JSON `default_left`
+  flag), `feature` (an index, not a name), `is_categorical, categories, split, gain,
+  cover, leaf_value`. On the depth-60 test it ran
   in 2.7 s against 8.6 s for `trees_to_dataframe`, with identical results. If even that
   is too much memory, reduce each chunk to per-depth summaries instead of keeping rows.
-- **Categorical splits (checked in this repo, xgboost 3.3.0).** `gain`, `cover` and
-  `leaf_value` match `trees_to_dataframe()`. On categorical split nodes, though,
-  `split` holds junk (about `1e-45`) and the category set isn't extracted, so filter
-  those nodes out before using `split`.
+- **Categorical splits (checked in this repo, xgboost 3.3.0).** On categorical split
+  nodes (`is_categorical`), `categories` holds the integer codes sent to the **right**
+  child; the rest go left. It is read from the JSON `categories_nodes/segments/sizes`
+  arrays. `split` is NaN there, because the raw `split_conditions` is junk (about
+  `1e-45`). `trees_to_dataframe()` swaps the labels on these nodes: its `Yes` is the
+  right (in-set) child. `left`/`right` stay JSON-native, but `add_gradient_statistics`'
+  `Metric_Yes`/`Metric_No` follow the `trees_to_dataframe` convention, so they match
+  `get_tree_statistics`. `category_names=True` (on `tree_node_stats` and
+  `get_tree_statistics_fast`) maps codes to values via
+  `booster.get_categories(export_to_arrow=True)`. That works for models trained on pandas
+  or polars `Enum` categoricals; numpy-trained models have no stored names and raise
+  `ValueError`.
 - **Reading the numbers.** The stored gain (`loss_changes`) has no ½ factor and no
   −γ term, unlike the textbook formula in the notebook's markdown cell. XGBoost prunes a
   split when `loss_chg < min_split_loss`, so `gain` is on the same scale as `gamma`

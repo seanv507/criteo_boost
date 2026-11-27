@@ -40,6 +40,15 @@ def _chunk(booster, tree_offset: int) -> pd.DataFrame:
     gain = cat("loss_changes", np.float32)
     cover = cat("sum_hessian", np.float32)
     default_left = cat("default_left", np.bool_)
+    is_categorical = cat("split_type", np.int8) == 1
+    # Category codes per categorical split node; only loops over those nodes.
+    categories = np.full(len(left), None, dtype=object)
+    for offset, t in zip(offsets, trees):
+        codes = t["categories"]
+        for node, seg, size in zip(
+            t["categories_nodes"], t["categories_segments"], t["categories_sizes"]
+        ):
+            categories[offset + node] = np.asarray(codes[seg : seg + size], np.int32)
     del trees
 
     local_tree = np.repeat(np.arange(len(sizes)), sizes)
@@ -71,7 +80,11 @@ def _chunk(booster, tree_offset: int) -> pd.DataFrame:
             # child that missing values go to (trees_to_dataframe's Missing), -1 on leaves
             "missing": np.where(default_left, left, right).astype(np.int32)[keep],
             "feature": np.where(is_leaf, -1, feat)[keep],
-            "split": np.where(is_leaf, nan, sconds)[keep],
+            "is_categorical": is_categorical[keep],
+            # codes that go to the `right` child (trees_to_dataframe calls it Yes)
+            "categories": categories[keep],
+            # split_conditions is not a threshold on categorical nodes
+            "split": np.where(is_leaf | is_categorical, nan, sconds)[keep],
             "gain": np.where(is_leaf, nan, gain)[keep],  # loss_chg, compare to gamma
             "cover": cover[keep],  # sum of hessian, compare to min_child_weight
             "leaf_value": np.where(is_leaf, sconds, nan)[keep],
@@ -79,13 +92,33 @@ def _chunk(booster, tree_offset: int) -> pd.DataFrame:
     )
 
 
-def tree_node_stats(booster, rounds_per_chunk: int = 5) -> pd.DataFrame:
+def _category_names(booster):
+    """Feature index -> array of category values, None for features without them."""
+    return [
+        None if values is None else values.to_numpy(zero_copy_only=False)
+        for _, values in booster.get_categories(export_to_arrow=True).to_arrow()
+    ]
+
+
+def tree_node_stats(
+    booster, rounds_per_chunk: int = 5, category_names: bool = False
+) -> pd.DataFrame:
     """One row per reachable node of every tree in ``booster``.
 
-    Columns: tree, node, depth, is_leaf, left, right, missing, feature (index), split,
-    gain, cover, leaf_value. Uses compact dtypes (~42 bytes per node). Lower
-    ``rounds_per_chunk`` if a single chunk doesn't fit in memory.
+    Columns: tree, node, depth, is_leaf, left, right, missing, feature (index),
+    is_categorical, categories, split, gain, cover, leaf_value. Uses compact dtypes
+    (~51 bytes per node, plus the category arrays). Lower ``rounds_per_chunk`` if a
+    single chunk doesn't fit in memory.
+
+    On categorical split nodes, ``categories`` holds the categories sent to the
+    ``right`` child (the rest go ``left``; ``trees_to_dataframe`` labels the right
+    child ``Yes`` there), and ``split`` is NaN. It is None on other nodes. By default
+    the categories are the integer codes stored in the model. With
+    ``category_names=True`` they are mapped to the original values via
+    ``booster.get_categories``, which needs pyarrow and a model trained on pandas or
+    polars categorical columns (XGBoost >= 3.1).
     """
+    names = _category_names(booster) if category_names else None
     parts, tree_offset = [], 0
     n_rounds = booster.num_boosted_rounds()
     for start in range(0, n_rounds, rounds_per_chunk):
@@ -94,7 +127,27 @@ def tree_node_stats(booster, rounds_per_chunk: int = 5) -> pd.DataFrame:
         )
         tree_offset = int(part["tree"].max()) + 1
         parts.append(part)
-    return pd.concat(parts, ignore_index=True)
+    stats = pd.concat(parts, ignore_index=True)
+    if names is not None:
+        cat_rows = stats.index[stats["is_categorical"]]
+        for feature in stats.loc[cat_rows, "feature"].unique():
+            if names[feature] is None:
+                raise ValueError(
+                    f"No stored category names for feature {feature}; the model was "
+                    "probably not trained on a categorical DataFrame column. Use "
+                    "category_names=False for the codes."
+                )
+        stats.loc[cat_rows, "categories"] = pd.Series(
+            [
+                names[f][codes]
+                for f, codes in zip(
+                    stats.loc[cat_rows, "feature"], stats.loc[cat_rows, "categories"]
+                )
+            ],
+            index=cat_rows,
+            dtype=object,
+        )
+    return stats
 
 
 def _lambda_eta(booster):
@@ -123,6 +176,8 @@ def add_gradient_statistics(
         pandas DataFrame of `stats` plus `H`, `G`, `Metric` (= G^2 / (H + lam)),
         `Metric_Yes`, `Metric_No` (the children's Metric) and `Gain_Expected`
         (= Metric_Yes + Metric_No - Metric). The last three are NaN on leaves.
+        Yes/No follow trees_to_dataframe: Yes is the `left` child, except on
+        categorical splits (`is_categorical`, if present), where it is `right`.
     """
     tree = stats["tree"].to_numpy()
     node = stats["node"].to_numpy().astype(np.int64)
@@ -154,8 +209,16 @@ def add_gradient_statistics(
         G[level] = G[left_row[level]] + G[right_row[level]]
 
     metric = G**2 / (H + lam)
-    metric_yes = np.where(internal, metric[left_row], np.nan)
-    metric_no = np.where(internal, metric[right_row], np.nan)
+    # Yes/No as in trees_to_dataframe: Yes is the left child, except on categorical
+    # splits, where it is the right (in-set) child.
+    if "is_categorical" in stats:
+        swap = stats["is_categorical"].to_numpy()
+        yes_row = np.where(swap, right_row, left_row)
+        no_row = np.where(swap, left_row, right_row)
+    else:
+        yes_row, no_row = left_row, right_row
+    metric_yes = np.where(internal, metric[yes_row], np.nan)
+    metric_no = np.where(internal, metric[no_row], np.nan)
     return stats.assign(
         H=H,
         G=G,
@@ -166,7 +229,9 @@ def add_gradient_statistics(
     )
 
 
-def get_tree_statistics_fast(model, rounds_per_chunk: int = 5) -> pd.DataFrame:
+def get_tree_statistics_fast(
+    model, rounds_per_chunk: int = 5, category_names: bool = False
+) -> pd.DataFrame:
     """`get_tree_statistics` built on `tree_node_stats` instead of `trees_to_dataframe`.
 
     Same G/H/Metric/Gain_Expected values, but scales to large (e.g. depth-60) models.
@@ -176,13 +241,15 @@ def get_tree_statistics_fast(model, rounds_per_chunk: int = 5) -> pd.DataFrame:
     Args:
         model: a fitted XGBoost sklearn model, or a `xgb.Booster`.
         rounds_per_chunk: passed to `tree_node_stats`; lower it if memory is tight.
+        category_names: passed to `tree_node_stats`; map category codes to values.
 
     Returns:
-        pandas DataFrame, see `add_gradient_statistics`.
+        pandas DataFrame, see `tree_node_stats` and `add_gradient_statistics`.
     """
     booster = model.get_booster() if hasattr(model, "get_booster") else model
     lam, eta = _lambda_eta(booster)
-    return add_gradient_statistics(tree_node_stats(booster, rounds_per_chunk), lam, eta)
+    stats = tree_node_stats(booster, rounds_per_chunk, category_names=category_names)
+    return add_gradient_statistics(stats, lam, eta)
 
 
 # ---------------------------------------------------------------------------

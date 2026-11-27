@@ -111,6 +111,13 @@ def test_get_tree_statistics_fast_matches_slow_deep_regularised(
     _compare_with_slow(deep_regularised_classifier, rounds_per_chunk)
 
 
+@pytest.mark.parametrize("rounds_per_chunk", [1, 100])
+def test_get_tree_statistics_fast_matches_slow_categorical(
+    categorical_classifier, rounds_per_chunk
+):
+    _compare_with_slow(categorical_classifier, rounds_per_chunk)
+
+
 def test_get_tree_statistics_fast_accepts_booster(fitted_classifier):
     from_model = ta.get_tree_statistics_fast(fitted_classifier)
     from_booster = ta.get_tree_statistics_fast(fitted_classifier.get_booster())
@@ -177,6 +184,8 @@ def test_tree_node_stats_matches_trees_to_dataframe(
         "right",
         "missing",
         "feature",
+        "is_categorical",
+        "categories",
         "split",
         "gain",
         "cover",
@@ -203,6 +212,116 @@ def test_tree_node_stats_matches_trees_to_dataframe(
     assert (stats["right"][~leaf].to_numpy() == child("No")).all()
     assert (stats["missing"][~leaf].to_numpy() == child("Missing")).all()
     assert (stats.loc[leaf, ["left", "right", "missing"]] == -1).all().all()
+    # numeric-only model: no categorical splits
+    assert not stats["is_categorical"].any()
+    assert stats["categories"].isna().all()
+
+
+# ---------------------------------------------------------------------------
+# tree_node_stats: categorical splits
+# ---------------------------------------------------------------------------
+
+CAT_VALUES = [f"v{i}" for i in range(12)]
+
+
+def _categorical_data():
+    rng = np.random.default_rng(3)
+    n = 3000
+    codes = rng.integers(0, len(CAT_VALUES), n)
+    a = rng.normal(size=n)
+    y = ((a > 0) ^ (codes % 3 == 0)).astype(int)
+    return a, codes, y
+
+
+def _fit_categorical(X, y):
+    # max_cat_to_onehot=1 forces partition (set-based) categorical splits
+    clf = xgb.XGBClassifier(
+        n_estimators=4,
+        max_depth=3,
+        enable_categorical=True,
+        max_cat_to_onehot=1,
+        tree_method="hist",
+    )
+    return clf.fit(X, y)
+
+
+@pytest.fixture(scope="module")
+def categorical_classifier():
+    a, codes, y = _categorical_data()
+    cat = pd.Categorical.from_codes(codes, categories=CAT_VALUES)
+    return _fit_categorical(pd.DataFrame({"a": a, "c": cat}), y)
+
+
+@pytest.fixture(scope="module")
+def polars_categorical_classifier():
+    a, codes, y = _categorical_data()
+    c = pl.Series([CAT_VALUES[i] for i in codes]).cast(pl.Enum(CAT_VALUES))
+    return _fit_categorical(pl.DataFrame({"a": a, "c": c}), y)
+
+
+@pytest.mark.parametrize("rounds_per_chunk", [1, 100])
+def test_tree_node_stats_categorical_matches_trees_to_dataframe(
+    categorical_classifier, rounds_per_chunk
+):
+    booster = categorical_classifier.get_booster()
+    stats = ta.tree_node_stats(booster, rounds_per_chunk=rounds_per_chunk)
+    stats = stats.sort_values(["tree", "node"]).reset_index(drop=True)
+    ref = booster.trees_to_dataframe().sort_values(["Tree", "Node"])
+    ref = ref.reset_index(drop=True)
+
+    is_cat = ((ref["Feature"] != "Leaf") & ref["Category"].notna()).to_numpy()
+    assert is_cat.any()
+    assert (stats["is_categorical"].to_numpy() == is_cat).all()
+    assert stats.loc[~is_cat, "categories"].isna().all()
+    assert stats.loc[is_cat, "split"].isna().all()
+
+    for codes, ref_codes in zip(stats["categories"][is_cat], ref["Category"][is_cat]):
+        assert codes.dtype == np.int32
+        assert sorted(codes.tolist()) == sorted(int(c) for c in ref_codes)
+
+    # trees_to_dataframe puts the in-set (right) child under Yes on these nodes
+    child = lambda col: ref[col][is_cat].str.split("-").str[1].astype(int).to_numpy()
+    assert (stats["right"][is_cat].to_numpy() == child("Yes")).all()
+    assert (stats["left"][is_cat].to_numpy() == child("No")).all()
+    assert (stats["missing"][is_cat].to_numpy() == child("Missing")).all()
+
+
+@pytest.mark.parametrize(
+    "fixture", ["categorical_classifier", "polars_categorical_classifier"]
+)
+def test_tree_node_stats_category_names(request, fixture):
+    booster = request.getfixturevalue(fixture).get_booster()
+    codes = ta.tree_node_stats(booster)
+    named = ta.tree_node_stats(booster, rounds_per_chunk=1, category_names=True)
+
+    is_cat = codes["is_categorical"]
+    assert is_cat.any()
+    for c, n in zip(codes.loc[is_cat, "categories"], named.loc[is_cat, "categories"]):
+        assert list(n) == [CAT_VALUES[i] for i in c]
+    assert named.loc[~is_cat, "categories"].isna().all()
+    # everything else is unchanged
+    other = [col for col in codes.columns if col != "categories"]
+    pd.testing.assert_frame_equal(codes[other], named[other])
+
+    fast = ta.get_tree_statistics_fast(booster, category_names=True)
+    assert [list(v) for v in fast.loc[is_cat, "categories"]] == [
+        list(v) for v in named.loc[is_cat, "categories"]
+    ]
+
+
+def test_tree_node_stats_category_names_unavailable():
+    # trained on a plain numpy array: XGBoost has no category values to report
+    rng = np.random.default_rng(4)
+    X = np.column_stack([rng.normal(size=2000), rng.integers(0, 6, 2000)])
+    y = (X[:, 1] % 2 == 0).astype(int)
+    dtrain = xgb.DMatrix(X, y, feature_types=["q", "c"], enable_categorical=True)
+    params = {"tree_method": "hist", "max_cat_to_onehot": 1, "max_depth": 2}
+    booster = xgb.train(params, dtrain, num_boost_round=2)
+
+    stats = ta.tree_node_stats(booster)
+    assert stats["is_categorical"].any()
+    with pytest.raises(ValueError, match="No stored category names"):
+        ta.tree_node_stats(booster, category_names=True)
 
 
 def test_tree_node_stats_missing_follows_default_direction():
